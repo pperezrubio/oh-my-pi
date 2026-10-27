@@ -8844,12 +8844,12 @@
 			]
 		},
 		{
-			"source": "Tasks identified by verbatim content, NEVER generated IDs (task-1). Unique, stable task/phase names; lost text: view, NEVER guess.",
+			"source": "Tasks identified by verbatim content, NEVER generated IDs (task-1). Unique, stable task/phase names; lost text: view, NEVER guess. `items` entries are plain strings — pass the task text directly, NOT objects like `{task: ...}`.",
 			"origin": "tools/todo.md",
 			"variants": [
-				"Tasks are identified by verbatim content, NEVER generated IDs (task-1). Unique, stable task/phase names; if text is lost: view, NEVER guess.",
-				"Tasks identified by verbatim content, NEVER by generated IDs (task-1). Unique, stable task/phase names; lost text: view it, NEVER guess.",
-				"Tasks identified by verbatim content, NEVER generated IDs (task-1). Unique and stable task/phase names; lost text: view, NEVER guess."
+				"Tasks are identified by verbatim content, NEVER generated IDs (task-1). Unique, stable task/phase names; if text is lost: view, NEVER guess. `items` entries are plain strings — pass the task text directly, NOT objects like `{task: ...}`.",
+				"Tasks identified by verbatim content, NEVER by generated IDs (task-1). Unique, stable task/phase names; lost text: view it, NEVER guess. `items` entries are plain strings — pass the task text directly, NOT objects like `{task: ...}`.",
+				"Tasks identified by verbatim content, NEVER generated IDs (task-1). Unique and stable task/phase names; lost text: view, NEVER guess. `items` entries are plain strings — pass the task text directly, NOT objects like `{task: ...}`."
 			]
 		},
 		{
