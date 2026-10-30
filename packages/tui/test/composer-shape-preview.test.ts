@@ -9,14 +9,14 @@ beforeAll(async () => {
 });
 
 describe("composer shape preview", () => {
-	it("resolves transparent composer preview text away from the terminal default", async () => {
+	it("keeps transparent composer preview text on the terminal default", async () => {
 		// The built-in `light` theme leaves `text` empty; a transparent shape must
-		// still emit an explicit contrast foreground instead of ESC[39m, matching
-		// the live editor so the preview stays readable on a light terminal.
+		// emit ESC[39m rather than a fixed color, matching the live editor so the
+		// preview follows whichever terminal is showing it.
 		await setTheme("light");
 		const box = renderComposerShapePreview("box", 80).join("\n");
-		expect(box).not.toContain("\x1b[39mAsk anything");
-		expect(box).toMatch(/\x1b\[38[;0-9]*mAsk anything/);
+		expect(box).toContain("\x1b[39mAsk anything");
+		expect(box).not.toMatch(/\x1b\[38[;0-9]*mAsk anything/);
 	});
 
 	it("borrows status rows from the live status source per shape layout", async () => {

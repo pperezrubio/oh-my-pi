@@ -115,6 +115,23 @@ describe("empty foreground contrast", () => {
 		}
 	});
 
+	it("leaves transparent composer text on the terminal default for empty text tokens", () => {
+		const { dark } = createBaseThemes();
+		const titaniumJson = getBuiltinThemes().titanium;
+		if (!titaniumJson) throw new Error("Titanium theme is unavailable");
+		try {
+			setThemeInstance(createTheme(titaniumJson, { mode: "truecolor" }));
+			const editor = new Editor(getEditorTheme());
+			editor.setText("typed");
+
+			const rendered = editor.render(40).join("\n");
+			expect(rendered).toContain("\x1b[39mtyped");
+			expect(rendered).not.toContain("\x1b[38;2;229;229;231mtyped");
+		} finally {
+			setThemeInstance(dark);
+		}
+	});
+
 	it("keeps filled composer text contrasted against its painted surface", () => {
 		const { dark } = createBaseThemes();
 		try {

@@ -173,8 +173,6 @@ export class Theme {
 	readonly #hexFgColors: Record<ThemeColor, string>;
 	/** Resolved hex strings for background colors — populated at construction. */
 	readonly #hexBgColors: Record<ThemeBg, string>;
-	/** Lazily resolved `fgResolved` ANSI per color; colors and mode are fixed per instance. */
-	readonly #resolvedFgColors = new Map<ThemeColor, string>();
 	/** Lazily built, frozen `sessionAccentInputs`; every input it reads is fixed per instance. */
 	#sessionAccentInputs: SessionAccentTheme | undefined;
 	#symbols: SymbolMap;
@@ -353,16 +351,15 @@ export class Theme {
 		return `${ansi}${text}\x1b[39m`; // Reset only foreground color
 	}
 
-	/** Apply a foreground, replacing terminal-default tokens with the theme's contrast-safe fallback. */
+	/**
+	 * Apply a foreground that survives nested resets. Terminal-default tokens stay
+	 * the terminal default: the text sits on the terminal's own background, and a
+	 * fixed color is unreadable on any viewer whose background differs.
+	 */
 	fgResolved(color: ThemeColor, text: string): string {
-		let resolved = this.#resolvedFgColors.get(color);
-		if (resolved === undefined) {
-			const ansi = this.#fgColors[color];
-			if (!ansi) throw new Error(`Unknown theme color: ${color}`);
-			resolved = ansi === "\x1b[39m" ? colorToAnsi(this.getColorHex(color), this.mode) : ansi;
-			this.#resolvedFgColors.set(color, resolved);
-		}
-		return `${resolved}${text.replace(FOREGROUND_RESET_PATTERN, `$&${resolved}`)}\x1b[39m`;
+		const ansi = this.#fgColors[color];
+		if (!ansi) throw new Error(`Unknown theme color: ${color}`);
+		return `${ansi}${text.replace(FOREGROUND_RESET_PATTERN, `$&${ansi}`)}\x1b[39m`;
 	}
 
 	bg(color: ThemeBg, text: string): string {

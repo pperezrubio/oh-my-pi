@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Kept transparent composer text on the terminal default foreground when the theme `text` token is empty, so typed text stays readable when one session is viewed from terminals with different backgrounds
+
 ## [18.14.1] - 2026-10-31
 
 ### Added
