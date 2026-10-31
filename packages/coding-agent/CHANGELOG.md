@@ -319,6 +319,10 @@
 - Fixed an advisor whose usage-limited account kept being reported as switchable retrying the same capped account thousands of times; it now tries each sibling account at most once per provider per failing review, then falls back, waits, or pauses on the quota ([#17472](https://github.com/can1357/oh-my-pi/issues/17472))
 - Fixed LSP definition, type definition, implementation and reference results carrying a stray carriage return on every source context line from files with Windows (CRLF) line endings ([#17549](https://github.com/can1357/oh-my-pi/pull/17549) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
+### Added
+
+- Added the `composer.terminalForeground` setting, which keeps typed text on the terminal default foreground when the theme `text` token is empty, for sessions shown on terminals with different backgrounds
+
 ## [18.14.1] - 2026-10-31
 
 ### Added
