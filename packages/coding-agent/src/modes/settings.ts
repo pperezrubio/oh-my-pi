@@ -18,7 +18,12 @@ import { WORD_COMPLETION_METHODS } from "@oh-my-pi/pi-tui/prompt/word-completion
 import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { setInlineImageMaxColumns, setInlineImageMaxRows } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setShimmerMode } from "@oh-my-pi/pi-tui/theme/shimmer";
-import { setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "@oh-my-pi/pi-tui/theme/theme";
+import {
+	setAutoThemeMapping,
+	setColorBlindMode,
+	setComposerTerminalForeground,
+	setSymbolPreset,
+} from "@oh-my-pi/pi-tui/theme/theme";
 
 const EMPTY_UNKNOWN_RECORD: Record<string, unknown> = {};
 
@@ -135,6 +140,19 @@ export const cfgComposerShape = register({
 	},
 });
 effect(cfgComposerShape, setEditorGapComposerShape);
+
+export const cfgComposerTerminalForeground = register({
+	id: "composer.terminalForeground",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "appearance",
+		group: "Composer",
+		label: "Terminal Foreground",
+		description: "Keep typed text on each terminal's own color, for sessions shown on several terminals",
+	},
+});
+effect(cfgComposerTerminalForeground, setComposerTerminalForeground);
 
 export const cfgComposerTokenRate = register({
 	id: "composer.tokenRate",
