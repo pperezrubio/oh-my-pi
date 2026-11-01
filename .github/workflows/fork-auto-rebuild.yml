@@ -1,11 +1,14 @@
 name: fork-auto-rebuild
 
-# Rebuilds this fork's todo-fix stack (fix/todo-item-normalization) on every
+# Rebuilds this fork's local patch stack (fix/local-patch-stack) on every
 # upstream release, so the installed binary always carries the newest upstream
-# version *and* the fork's open patch, until the patch lands upstream (via the
-# fork's own PR or an equivalent fix). Artifacts are published as fork releases
-# (`fork-<version>`) and consumed by the laptop-side `omp-fork-sync` script,
-# which force-owns ~/.bun/bin/omp while the fork is live.
+# version *and* every open local patch, until each patch lands upstream (via the
+# fork's own PRs or an equivalent fix). The stack currently holds two patches:
+# the todo item-shape fix (upstream #16279) and the opt-in
+# composer.terminalForeground setting that keeps typed text on the terminal's own
+# foreground in shared multiplexer panes. Artifacts are published as fork
+# releases (`fork-<version>`) and consumed by the laptop-side `omp-fork-sync`
+# script, which force-owns ~/.bun/bin/omp while the fork is live.
 #
 # Design notes (do not "simplify" these away):
 #   - Everything builds on Linux: upstream cross-compiles every release binary
@@ -15,11 +18,9 @@ name: fork-auto-rebuild
 #   - The branch push is `--force-with-lease` against the SHA recorded at job
 #     start, so a human rebase/push that raced this run is never clobbered; a
 #     conflicting rebase stops the run before anything is pushed or published.
-#   - The retirement probe runs this fork's regression tests against the STOCK
-#     upstream tag. Green there means upstream now handles every malformed todo
-#     shape the patch supports, i.e. the fork's patch is redundant: an issue is
-#     opened and the next `omp-fork-sync` reports that stock `omp update` is
-#     safe again.
+#   - Retirement is per patch and only reported when EVERY patch is redundant,
+#     because the todo fix passes a behavioural battery on the stock tree while
+#     the composer setting is detected by its registration upstream.
 on:
    workflow_dispatch:
       inputs:
@@ -43,7 +44,7 @@ concurrency:
 env:
    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
    UPSTREAM_REPO: can1357/oh-my-pi
-   FIX_BRANCH: fix/todo-item-normalization
+   FIX_BRANCH: fix/local-patch-stack
    RELEASE_TAG_PREFIX: fork-
    # Upstream's per-test wall-clock ceiling (see ci.yml).
    OMP_TEST_TIMEOUT: "120"
@@ -225,30 +226,44 @@ jobs:
                  bun scripts/stamp-native-version.ts "$addon"
               done
 
-         - name: Retirement probe (stock tag vs fork regression battery)
+         # The stack carries two independent patches (todo item shapes, and the
+         # composer.terminalForeground setting). Each probe asks whether the
+         # STOCK tag already covers that patch; the fork is retired only when
+         # every patch is redundant.
+         - name: Retirement probes (stock tag vs each fork patch)
            id: retire
            if: steps.target.outputs.current != 'true' || inputs.force == 'true'
            shell: bash
            continue-on-error: true
            run: |
               set -uo pipefail
-              # Detached checkout of the stock tag; untracked build outputs
-              # (packages/natives/native/*.node) survive it. The overlay only
-              # touches one tracked file, discarded by the forced checkout back.
+              tag="${{ steps.target.outputs.tag }}"
+              todo_retired=false
+              composer_retired=false
+
+              # Composer patch: upstream registering the same setting id is the
+              # equivalence signal; no behavioural test is needed for it.
+              if git grep -qF 'composer.terminalForeground' "$tag" -- packages/coding-agent/src/modes/settings.ts; then
+                 composer_retired=true
+              fi
+
+              # Todo patch: the fork's regression suite must pass on the stock
+              # tree. Untracked build outputs survive the detached checkout.
               git checkout --detach "${{ steps.target.outputs.sha }}"
-              git checkout HEAD -- . > /dev/null 2>&1 || true
               git checkout "${FIX_BRANCH}" -- packages/coding-agent/test/tools/todo.test.ts
               set +e
               ( cd packages/coding-agent && bun test test/tools/todo.test.ts ) 2>&1 | tail -60
               rc="${PIPESTATUS[0]}"
               set -e
               git checkout -f "${FIX_BRANCH}"
-              if [ "$rc" -eq 0 ]; then
+              if [ "$rc" -eq 0 ]; then todo_retired=true; fi
+
+              echo "todo patch redundant on stock $tag: ${todo_retired}" >> "$GITHUB_STEP_SUMMARY"
+              echo "composer patch redundant on stock $tag: ${composer_retired}" >> "$GITHUB_STEP_SUMMARY"
+              if [ "$todo_retired" = true ] && [ "$composer_retired" = true ]; then
                  echo "retired=true" >> "$GITHUB_OUTPUT"
-                 echo "The fork's regression battery passes on the STOCK ${{ steps.target.outputs.tag }} tree: the patch is redundant." >> "$GITHUB_STEP_SUMMARY"
               else
                  echo "retired=false" >> "$GITHUB_OUTPUT"
-                 echo "Stock ${{ steps.target.outputs.tag }} still fails the fork's regression battery: patch still required." >> "$GITHUB_STEP_SUMMARY"
               fi
 
          - name: Test battery and lint
@@ -303,14 +318,22 @@ jobs:
               # the commit as redundant, the stack is empty and upstream's own
               # wording applies, so the assertions are skipped rather than
               # blocking the publish.
-              if [ "$(git rev-list --count "${{ steps.target.outputs.tag }}..HEAD")" -gt 0 ]; then
+              stack_subjects="$(git log --format=%s "${{ steps.target.outputs.tag }}..HEAD")"
+              if grep -q 'wrapped todo item shapes' <<< "$stack_subjects"; then
                  grep -aqF 'items` entries are plain strings' "$binary" \
-                    || { echo "::error::fork patch prompt line missing from the built binary"; exit 1; }
+                    || { echo "::error::todo patch prompt line missing from the built binary"; exit 1; }
                  grep -aqF 'matches multiple items' "$binary" \
-                    || { echo "::error::fork patch ambiguity guard missing from the built binary"; exit 1; }
-                 echo "fork patch markers present in the artifact"
+                    || { echo "::error::todo patch ambiguity guard missing from the built binary"; exit 1; }
+                 echo "todo patch markers present in the artifact"
               else
-                 echo "no fork commits on top of the tag (patch dropped as redundant); marker assertions skipped"
+                 echo "todo patch is not in the stack; its markers skipped"
+              fi
+              if grep -q 'terminalForeground' <<< "$stack_subjects"; then
+                 grep -aqF 'composer.terminalForeground' "$binary" \
+                    || { echo "::error::composer patch setting missing from the built binary"; exit 1; }
+                 echo "composer patch marker present in the artifact"
+              else
+                 echo "composer patch is not in the stack; its marker skipped"
               fi
               bash scripts/ci-macos-sign.sh "$binary"
               cd packages/coding-agent/binaries
@@ -361,7 +384,7 @@ jobs:
               else
                  gh release create "$release_tag" $artifacts --repo "$GITHUB_REPOSITORY" \
                     --target "$head_sha" \
-                    --title "omp ${{ steps.target.outputs.version }} + todo fix stack" \
+                    --title "omp ${{ steps.target.outputs.version }} + 2 local patches" \
                     --notes-file "$notes"
               fi
               echo "Published: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${release_tag}" >> "$GITHUB_STEP_SUMMARY"
@@ -374,10 +397,10 @@ jobs:
               TARGET_TAG: ${{ steps.target.outputs.tag }}
            run: |
               set -euo pipefail
-              title="Retire fork: upstream ${TARGET_TAG} passes the #16279 regression battery"
+              title="Retire fork: upstream ${TARGET_TAG} covers both local patches"
               body_file="$RUNNER_TEMP/retire-body.md"
-              printf 'The fork regression battery (%s) passes on the stock upstream tree, so %s no longer adds anything.\n\nNext step: run `omp update` to return to stock binaries, delete the omp-fork-sync LaunchAgent and script from the dotfiles, and delete this workflow.\n' \
-                 'packages/coding-agent/test/tools/todo.test.ts' "$FIX_BRANCH" > "$body_file"
+              printf 'Both fork patches are now redundant on the stock upstream tree (%s): the todo-shape regression battery passes there and the composer.terminalForeground setting is registered upstream, so %s adds nothing.\n\nNext step: run `omp update` to return to stock binaries, delete the omp-fork-sync LaunchAgent and script from the dotfiles, and delete this workflow.\n' \
+                 'todo.test.ts' "$FIX_BRANCH" > "$body_file"
               existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 --json number,title \
                  | jq -r '.[] | select(.title | startswith("Retire fork:")) | .number' | head -n1)"
               if [ -n "${existing:-}" ]; then
