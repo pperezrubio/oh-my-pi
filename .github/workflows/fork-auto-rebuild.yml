@@ -91,15 +91,25 @@ jobs:
                  exit 1
               fi
               target_sha="$(git rev-parse "refs/tags/${tag}^{commit}")"
+              # The release name and the version the binary reports must agree:
+              # a tag that does not contain the matching version bump (upstream
+              # has re-pointed tags before) would otherwise publish fork-X while
+              # the artifact prints omp/Y, and the sync would refuse to install it.
+              tree_version="$(git show "${tag}:packages/coding-agent/package.json" | jq -r '.version // empty' 2>/dev/null || true)"
+              if [ -z "$tree_version" ]; then
+                 tree_version="${tag#v}"
+              elif [ "$tree_version" != "${tag#v}" ]; then
+                 echo "::warning title=Version mismatch::tag ${tag} carries package version ${tree_version}; naming the release after the tree"
+              fi
               base_sha="$(git merge-base "origin/${FIX_BRANCH}" "refs/tags/${tag}^{commit}")"
-              release_tag="${RELEASE_TAG_PREFIX}${tag#v}"
+              release_tag="${RELEASE_TAG_PREFIX}${tree_version}"
               if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
                  release_exists=true
               else
                  release_exists=false
               fi
               echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-              echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+              echo "version=${tree_version}" >> "$GITHUB_OUTPUT"
               echo "sha=${target_sha}" >> "$GITHUB_OUTPUT"
               # "Current" means nothing left to do: the artifact for this exact
               # upstream tag exists. The stack base is diagnostic only — when a
