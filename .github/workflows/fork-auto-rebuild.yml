@@ -90,7 +90,7 @@ jobs:
                  exit 1
               fi
               target_sha="$(git rev-parse "refs/tags/${tag}^{commit}")"
-              base_sha="$(git rev-parse "${FIX_BRANCH}~1")"
+              base_sha="$(git rev-parse "origin/${FIX_BRANCH}~1")"
               echo "tag=${tag}" >> "$GITHUB_OUTPUT"
               echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
               echo "sha=${target_sha}" >> "$GITHUB_OUTPUT"
@@ -177,6 +177,7 @@ jobs:
                     build --repository_cache="$HOME/.cache/bazel-repo" --disk_cache="$HOME/.cache/bazel-disk" \
                     "//:${target}"
               done
+              mkdir -p packages/natives/native
               for target in linux-x64-baseline linux-x64-modern; do
                  cp -L bazel-bin/"${target}"/*.node packages/natives/native/
               done
