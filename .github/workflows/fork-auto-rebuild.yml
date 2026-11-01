@@ -395,13 +395,26 @@ jobs:
               bun run check:tools
               bun scripts/ci-test-ts.ts local-ts
 
+         # The branch push is provenance, not the deliverable: the GITHUB_TOKEN is
+         # a GitHub App token and may refuse to update a branch whose commits touch
+         # .github/workflows/** (a rebase onto a new tag always does, because the
+         # branch tree then carries upstream's newer ci.yml). Publishing must not
+         # depend on that permission, so a rejected push is a warning and the
+         # release falls back to tagging the branch, with the stack SHA in the
+         # notes.
          - name: Push rebased branch
+           id: push
            if: steps.target.outputs.current != 'true' || inputs.force == 'true'
            shell: bash
            run: |
               set -euo pipefail
-              git push --force-with-lease="refs/heads/${FIX_BRANCH}:${{ steps.pre.outputs.before }}" \
-                 origin "refs/heads/${FIX_BRANCH}:refs/heads/${FIX_BRANCH}"
+              if git push --force-with-lease="refs/heads/${FIX_BRANCH}:${{ steps.pre.outputs.before }}" \
+                    origin "refs/heads/${FIX_BRANCH}:refs/heads/${FIX_BRANCH}"; then
+                 echo "pushed=true" >> "$GITHUB_OUTPUT"
+              else
+                 echo "pushed=false" >> "$GITHUB_OUTPUT"
+                 echo "::warning title=Branch push rejected::the rebased stack stays local to this artifact; the release is tagged against ${FIX_BRANCH} and its commit SHA is recorded in the notes"
+              fi
 
          - name: Publish fork release
            if: steps.target.outputs.current != 'true' || inputs.force == 'true'
@@ -416,6 +429,13 @@ jobs:
               release_tag="${RELEASE_TAG_PREFIX}${TARGET_VERSION}"
               head_sha="$(git rev-parse HEAD)"
               notes="$RUNNER_TEMP/notes.md"
+              if [ "${{ steps.push.outputs.pushed }}" = "true" ]; then
+                 target="$head_sha"
+                 stack_state="branch ${FIX_BRANCH} pushed at ${head_sha}"
+              else
+                 target="${FIX_BRANCH}"
+                 stack_state="branch push rejected by the App token; artifact built from ${head_sha}"
+              fi
               if [ "$RETIRED" = "true" ]; then
                  probe="stock upstream PASSES the regression battery - the patch is redundant and stock 'omp update' is safe"
               else
@@ -425,6 +445,7 @@ jobs:
                  echo "Upstream release: https://github.com/${UPSTREAM_REPO}/releases/tag/${TARGET_TAG}"
                  echo
                  echo "Fork commit: ${head_sha} (${FIX_BRANCH})"
+                 echo "Stack: ${stack_state}"
                  echo "Battery: local-ts + check:tools green on this tree."
                  echo "Retirement probe: ${probe}"
                  echo
@@ -438,7 +459,7 @@ jobs:
                  gh release edit "$release_tag" --repo "$GITHUB_REPOSITORY" --notes-file "$notes"
               else
                  gh release create "$release_tag" $artifacts --repo "$GITHUB_REPOSITORY" \
-                    --target "$head_sha" \
+                    --target "$target" \
                     --title "omp ${{ steps.target.outputs.version }} + 2 local patches" \
                     --notes-file "$notes"
               fi
