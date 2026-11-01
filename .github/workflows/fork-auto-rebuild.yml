@@ -101,15 +101,16 @@ jobs:
               echo "tag=${tag}" >> "$GITHUB_OUTPUT"
               echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
               echo "sha=${target_sha}" >> "$GITHUB_OUTPUT"
-              # "Current" means nothing left to do: the stack already sits on this
-              # tag AND the artifact for it exists. A stack that is based on the
-              # tag but never published (a failed first run) must still build.
-              if [ "$target_sha" = "$base_sha" ] && [ "$release_exists" = true ]; then
+              # "Current" means nothing left to do: the artifact for this exact
+              # upstream tag exists. The stack base is diagnostic only — when a
+              # push is rejected the branch stays parked on an older tag's base
+              # forever, and gating on it would rebuild the same artifact on every
+              # timer cycle.
+              echo "stack base ${base_sha} vs target ${tag} (${target_sha}); release $release_tag exists=${release_exists}"
+              if [ "$release_exists" = true ]; then
                  echo "current=true" >> "$GITHUB_OUTPUT"
-                 echo "fork branch already sits on ${tag} and $release_tag is published; force=${{ inputs.force }}"
               else
                  echo "current=false" >> "$GITHUB_OUTPUT"
-                 echo "stack base ${base_sha} -> target ${tag} (${target_sha}); release $release_tag exists=${release_exists}"
               fi
 
          - name: Skip when already current
