@@ -277,14 +277,6 @@ jobs:
                  echo "retired=false" >> "$GITHUB_OUTPUT"
               fi
 
-         - name: Test battery and lint
-           if: steps.target.outputs.current != 'true' || inputs.force == 'true'
-           shell: bash
-           run: |
-              set -euo pipefail
-              bun run check:tools
-              bun scripts/ci-test-ts.ts local-ts
-
          # Prefer the version-pinned npm leaf for the darwin addon: the local
          # patches touch no Rust, so the addon published for this exact upstream
          # version is the same bytes the SDK cross build produces, and it removes
@@ -360,10 +352,12 @@ jobs:
               # blocking the publish.
               stack_subjects="$(git log --format=%s "${{ steps.target.outputs.tag }}..HEAD")"
               if grep -q 'wrapped todo item shapes' <<< "$stack_subjects"; then
-                 grep -aqF 'items` entries are plain strings' "$binary" \
-                    || { echo "::error::todo patch prompt line missing from the built binary"; exit 1; }
+                 # Prompt markdown is not stored verbatim in the bundle, so the
+                 # markers are the patch's own TS string literals.
                  grep -aqF 'matches multiple items' "$binary" \
                     || { echo "::error::todo patch ambiguity guard missing from the built binary"; exit 1; }
+                 grep -aqF 'must be the task text as a plain string' "$binary" \
+                    || { echo "::error::todo patch item-key validation missing from the built binary"; exit 1; }
                  echo "todo patch markers present in the artifact"
               else
                  echo "todo patch is not in the stack; its markers skipped"
@@ -379,6 +373,17 @@ jobs:
               cd packages/coding-agent/binaries
               sha256sum omp-darwin-arm64 > SHA256SUMS.txt
               cat SHA256SUMS.txt
+
+         # The battery runs after the artifact is built and asserted, so an
+         # artifact problem surfaces in minutes instead of after 30 minutes of
+         # tests; nothing is pushed or published until both are green.
+         - name: Test battery and lint
+           if: steps.target.outputs.current != 'true' || inputs.force == 'true'
+           shell: bash
+           run: |
+              set -euo pipefail
+              bun run check:tools
+              bun scripts/ci-test-ts.ts local-ts
 
          - name: Push rebased branch
            if: steps.target.outputs.current != 'true' || inputs.force == 'true'
