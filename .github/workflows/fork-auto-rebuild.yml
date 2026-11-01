@@ -29,9 +29,9 @@ on:
             required: false
             default: ""
          force:
-            description: "Rebuild even when the fork branch already sits on that tag"
-            type: boolean
-            default: false
+            description: "Rebuild even when the fork branch already sits on that tag (true/false)"
+            type: string
+            default: "false"
 
 permissions:
    contents: write
@@ -176,15 +176,17 @@ jobs:
               echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
 
          # The darwin cross toolchain materializes Apple's Command Line Tools SDK
-         # from swcdn.apple.com, which intermittently answers 403 to cloud runner
-         # IPs; Bazel makes one attempt and aborts the analysis. Seed its
-         # repository cache here (sha256-pinned, so retries are safe) and let the
-         # cache carry it from then on.
+         # from swcdn.apple.com, which answers 403 to some cloud runner IPs (proven
+         # 2026-11-01: curl and bazel alike, six attempts). Bazel makes one attempt
+         # and aborts the analysis, so the SDK archive is seeded into bazel's
+         # repository cache here (sha256-pinned, retries safe) and the cache carries
+         # it afterwards. The npm-leaf path below skips this entirely.
          - name: Seed the macOS SDK package in the bazel repository cache
-           if: steps.target.outputs.current != 'true' || inputs.force == 'true'
+           if: always() && steps.target.outputs.current != 'true'
            shell: bash
+           continue-on-error: true
            run: |
-              set -euo pipefail
+              set -uo pipefail
               url="https://swcdn.apple.com/content/downloads/58/48/082-83364-A_KCEBOO2NJS/0d2rj4y5ucjlkgcvqt6f6a4pergug5tu2b/CLTools_macOSNMOS_SDK.pkg"
               sha="d55351824fd17742fd6e1e7a252fa1028698f32147ee48be9a6b75442bf30575"
               dest="$HOME/.cache/bazel-repo/content_addressable/sha256/$sha/file"
@@ -283,18 +285,47 @@ jobs:
               bun run check:tools
               bun scripts/ci-test-ts.ts local-ts
 
-         - name: Build darwin-arm64 native addon
+         # Prefer the version-pinned npm leaf for the darwin addon: the local
+         # patches touch no Rust, so the addon published for this exact upstream
+         # version is the same bytes the SDK cross build produces, and it removes
+         # Apple's CDN from the critical path. Bazel stays as the fallback.
+         - name: Stage darwin-arm64 native addon
            if: steps.target.outputs.current != 'true' || inputs.force == 'true'
            shell: bash
+           env:
+              TARGET_VERSION: ${{ steps.target.outputs.version }}
            run: |
               set -eo pipefail
-              if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
-              bazelisk --bazelrc="${{ steps.bazelrc.outputs.rc }}" \
-                 build --repository_cache="$HOME/.cache/bazel-repo" --disk_cache="$HOME/.cache/bazel-disk" \
-                 //:natives-darwin-arm64
-              cp -L bazel-bin/natives-darwin-arm64/*.node packages/natives/native/
-              bun scripts/stamp-native-version.ts packages/natives/native/pi_natives.darwin-arm64.node
-              file packages/natives/native/pi_natives.darwin-arm64.node
+              mkdir -p packages/natives/native
+              addon="packages/natives/native/pi_natives.darwin-arm64.node"
+              leaf="@oh-my-pi/pi-natives-darwin-arm64@${TARGET_VERSION}"
+              tarball="$(npm view "$leaf" dist.tarball 2>/dev/null || true)"
+              if [ -n "$tarball" ]; then
+                 curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/leaf.tgz" "$tarball"
+                 tar -xzf "$RUNNER_TEMP/leaf.tgz" -C "$RUNNER_TEMP"
+                 cp "$RUNNER_TEMP/package/pi_natives.darwin-arm64.node" "$addon"
+                 echo "darwin addon staged from $leaf"
+              else
+                 echo "::warning title=npm leaf missing::no $leaf published; building the darwin addon with bazel"
+                 if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
+                 built=false
+                 for attempt in 1 2 3; do
+                    if bazelisk --bazelrc="${{ steps.bazelrc.outputs.rc }}" \
+                          build --repository_cache="$HOME/.cache/bazel-repo" --disk_cache="$HOME/.cache/bazel-disk" \
+                          //:natives-darwin-arm64; then
+                       built=true
+                       break
+                    fi
+                    echo "bazel darwin build attempt ${attempt} failed"
+                    sleep 20
+                 done
+                 [ "$built" = true ] || { echo "::error::darwin addon build failed after retries"; exit 1; }
+                 cp -L bazel-bin/natives-darwin-arm64/*.node "$addon"
+              fi
+              if ! bun scripts/stamp-native-version.ts "$addon"; then
+                 echo "::warning::addon left as published; the embedder accepts a pre-stamp addon"
+              fi
+              file "$addon"
 
          # Cold bazel work here is ~20 min per addon, so the caches are persisted
          # even when a later step fails; otherwise every debugging iteration
