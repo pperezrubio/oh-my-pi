@@ -92,15 +92,24 @@ jobs:
               fi
               target_sha="$(git rev-parse "refs/tags/${tag}^{commit}")"
               base_sha="$(git merge-base "origin/${FIX_BRANCH}" "refs/tags/${tag}^{commit}")"
+              release_tag="${RELEASE_TAG_PREFIX}${tag#v}"
+              if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+                 release_exists=true
+              else
+                 release_exists=false
+              fi
               echo "tag=${tag}" >> "$GITHUB_OUTPUT"
               echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
               echo "sha=${target_sha}" >> "$GITHUB_OUTPUT"
-              if [ "$target_sha" = "$base_sha" ]; then
+              # "Current" means nothing left to do: the stack already sits on this
+              # tag AND the artifact for it exists. A stack that is based on the
+              # tag but never published (a failed first run) must still build.
+              if [ "$target_sha" = "$base_sha" ] && [ "$release_exists" = true ]; then
                  echo "current=true" >> "$GITHUB_OUTPUT"
-                 echo "fork branch already sits on ${tag}; force=${{ inputs.force }}"
+                 echo "fork branch already sits on ${tag} and $release_tag is published; force=${{ inputs.force }}"
               else
                  echo "current=false" >> "$GITHUB_OUTPUT"
-                 echo "fork branch base ${base_sha} -> rebasing onto ${tag} (${target_sha})"
+                 echo "stack base ${base_sha} -> target ${tag} (${target_sha}); release $release_tag exists=${release_exists}"
               fi
 
          - name: Skip when already current
@@ -351,6 +360,7 @@ jobs:
               # wording applies, so the assertions are skipped rather than
               # blocking the publish.
               stack_subjects="$(git log --format=%s "${{ steps.target.outputs.tag }}..HEAD")"
+              echo "marker counts: ambiguity=$(grep -ac 'matches multiple items' "$binary" || true) keyrule=$(grep -ac 'must be the task text as a plain string' "$binary" || true) composer=$(grep -ac 'composer.terminalForeground' "$binary" || true)"
               if grep -q 'wrapped todo item shapes' <<< "$stack_subjects"; then
                  # Prompt markdown is not stored verbatim in the bundle, so the
                  # markers are the patch's own TS string literals.
