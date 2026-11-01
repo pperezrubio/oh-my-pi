@@ -103,7 +103,7 @@ jobs:
               fi
 
          - name: Skip when already current
-           if: steps.target.outputs.current == 'true' && inputs.force != true
+           if: steps.target.outputs.current == 'true' && inputs.force != 'true'
            shell: bash
            run: |
               echo "Nothing to do: ${FIX_BRANCH} is already based on ${{ steps.target.outputs.tag }}." >> "$GITHUB_STEP_SUMMARY"
@@ -112,7 +112,7 @@ jobs:
          # ---- everything below only runs when there is real work ------------
 
          - name: Rebase fix stack onto target release
-           if: steps.target.outputs.current != 'true' || inputs.force == true
+           if: steps.target.outputs.current != 'true' || inputs.force == 'true'
            shell: bash
            run: |
               set -euo pipefail
@@ -129,16 +129,16 @@ jobs:
               git log --oneline "${{ steps.target.outputs.tag }}..HEAD" | tee "$GITHUB_STEP_SUMMARY"
 
          - name: Install bun and dependencies
-           if: steps.target.outputs.current != 'true' || inputs.force == true
+           if: steps.target.outputs.current != 'true' || inputs.force == 'true'
            uses: ./.github/actions/bun-install
 
          - name: Compose bazel rc
            id: bazelrc
-           if: steps.target.outputs.current != 'true' || inputs.force == true
+           if: steps.target.outputs.current != 'true' || inputs.force == 'true'
            uses: ./.github/actions/bazel-cache
 
          - name: Restore bazel and cargo caches
-           if: steps.target.outputs.current != 'true' || inputs.force == true
+           if: steps.target.outputs.current != 'true' || inputs.force == 'true'
            uses: actions/cache@v4
            with:
               path: |
@@ -151,7 +151,7 @@ jobs:
                  fork-bazel-${{ runner.os }}-
 
          - name: Install bazelisk
-           if: steps.target.outputs.current != 'true' || inputs.force == true
+           if: steps.target.outputs.current != 'true' || inputs.force == 'true'
            shell: bash
            run: |
               set -euo pipefail
@@ -165,7 +165,7 @@ jobs:
               echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
 
          - name: Build linux-x64 native addons (test harness)
-           if: steps.target.outputs.current != 'true' || inputs.force == true
+           if: steps.target.outputs.current != 'true' || inputs.force == 'true'
            shell: bash
            run: |
               set -eo pipefail
@@ -184,7 +184,7 @@ jobs:
 
          - name: Retirement probe (stock tag vs fork regression battery)
            id: retire
-           if: steps.target.outputs.current != 'true' || inputs.force == true
+           if: steps.target.outputs.current != 'true' || inputs.force == 'true'
            shell: bash
            continue-on-error: true
            run: |
@@ -209,7 +209,7 @@ jobs:
               fi
 
          - name: Test battery and lint
-           if: steps.target.outputs.current != 'true' || inputs.force == true
+           if: steps.target.outputs.current != 'true' || inputs.force == 'true'
            shell: bash
            run: |
               set -euo pipefail
@@ -217,7 +217,7 @@ jobs:
               bun scripts/ci-test-ts.ts local-ts
 
          - name: Build darwin-arm64 native addon
-           if: steps.target.outputs.current != 'true' || inputs.force == true
+           if: steps.target.outputs.current != 'true' || inputs.force == 'true'
            shell: bash
            run: |
               set -eo pipefail
@@ -229,7 +229,7 @@ jobs:
               file packages/natives/native/pi_natives.darwin-arm64.node
 
          - name: Build release binary
-           if: steps.target.outputs.current != 'true' || inputs.force == true
+           if: steps.target.outputs.current != 'true' || inputs.force == 'true'
            shell: bash
            env:
               RELEASE_TARGETS: darwin-arm64
@@ -251,7 +251,7 @@ jobs:
               cat SHA256SUMS.txt
 
          - name: Push rebased branch
-           if: steps.target.outputs.current != 'true' || inputs.force == true
+           if: steps.target.outputs.current != 'true' || inputs.force == 'true'
            shell: bash
            run: |
               set -euo pipefail
@@ -259,24 +259,32 @@ jobs:
                  origin "refs/heads/${FIX_BRANCH}:refs/heads/${FIX_BRANCH}"
 
          - name: Publish fork release
-           if: steps.target.outputs.current != 'true' || inputs.force == true
+           if: steps.target.outputs.current != 'true' || inputs.force == 'true'
            shell: bash
            env:
               GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              TARGET_TAG: ${{ steps.target.outputs.tag }}
+              TARGET_VERSION: ${{ steps.target.outputs.version }}
+              RETIRED: ${{ steps.retire.outputs.retired }}
            run: |
               set -euo pipefail
-              release_tag="${RELEASE_TAG_PREFIX}${{ steps.target.outputs.version }}"
+              release_tag="${RELEASE_TAG_PREFIX}${TARGET_VERSION}"
               head_sha="$(git rev-parse HEAD)"
               notes="$RUNNER_TEMP/notes.md"
+              if [ "$RETIRED" = "true" ]; then
+                 probe="stock upstream PASSES the regression battery - the patch is redundant and stock 'omp update' is safe"
+              else
+                 probe="stock upstream still fails the regression battery - the patch is still required"
+              fi
               {
-                 echo "Upstream release: https://github.com/${UPSTREAM_REPO}/releases/tag/${{ steps.target.outputs.tag }}"
-                 echo ""
-                 echo "Fork commit: \`${head_sha}\` (${FIX_BRANCH})"
+                 echo "Upstream release: https://github.com/${UPSTREAM_REPO}/releases/tag/${TARGET_TAG}"
+                 echo
+                 echo "Fork commit: ${head_sha} (${FIX_BRANCH})"
                  echo "Battery: local-ts + check:tools green on this tree."
-                 echo "Retirement probe: ${{ steps.retire.outputs.retired == 'true' && 'stock upstream PASSES the regression battery — patch redundant, stock `omp update` is safe' || 'stock upstream still fails the regression battery — patch still required' }}"
-                 echo ""
+                 echo "Retirement probe: ${probe}"
+                 echo
                  echo '```'
-                 git log --oneline "${{ steps.target.outputs.tag }}..HEAD"
+                 git log --oneline "${TARGET_TAG}..HEAD"
                  echo '```'
               } > "$notes"
               artifacts="packages/coding-agent/binaries/omp-darwin-arm64 packages/coding-agent/binaries/SHA256SUMS.txt"
@@ -296,15 +304,19 @@ jobs:
            shell: bash
            env:
               GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              TARGET_TAG: ${{ steps.target.outputs.tag }}
            run: |
               set -euo pipefail
-              title="Retire fork: upstream ${target_tag} passes the #16279 regression battery"
-              existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title $title" --json number --jq '.[0].number // empty')"
-              body=$'The fork regression battery (`packages/coding-agent/test/tools/todo.test.ts`) passes on the stock upstream tree, so `fix/todo-item-normalization` no longer adds anything.\n\nNext step: run `omp update` to return to stock binaries, then delete the `omp-fork-sync` LaunchAgent/script from the dotfiles and remove this workflow.'
-              if [ -n "$existing" ]; then
-                 gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+              title="Retire fork: upstream ${TARGET_TAG} passes the #16279 regression battery"
+              body_file="$RUNNER_TEMP/retire-body.md"
+              printf 'The fork regression battery (%s) passes on the stock upstream tree, so %s no longer adds anything.\n\nNext step: run `omp update` to return to stock binaries, delete the omp-fork-sync LaunchAgent and script from the dotfiles, and delete this workflow.\n' \
+                 'packages/coding-agent/test/tools/todo.test.ts' "$FIX_BRANCH" > "$body_file"
+              existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 --json number,title \
+                 | jq -r '.[] | select(.title | startswith("Retire fork:")) | .number' | head -n1)"
+              if [ -n "${existing:-}" ]; then
+                 gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body-file "$body_file"
               else
-                 gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+                 gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file "$body_file"
               fi
 
          - name: Report failure
@@ -317,12 +329,13 @@ jobs:
               tag="${{ steps.target.outputs.tag }}"
               [ -n "$tag" ] || tag="unknown"
               title="fork-auto-rebuild failed for ${tag}"
-              existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title $title" --json number --jq '.[0].number // empty')"
-              body="Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
-
-The installed binary was NOT touched: a failed run changes the publication surface only, and the laptop sync installs nothing without a matching release asset."
-              if [ -n "$existing" ]; then
-                 gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+              body_file="$RUNNER_TEMP/failure-body.md"
+              printf 'Run: %s/%s/actions/runs/%s\n\nThe installed binary was NOT touched: a failed run changes the publication surface only, and the laptop sync installs nothing without a matching release asset.\n' \
+                 "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}" > "$body_file"
+              existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 --json number,title \
+                 | jq -r '.[] | select(.title | startswith("fork-auto-rebuild failed")) | .number' | head -n1)"
+              if [ -n "${existing:-}" ]; then
+                 gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body-file "$body_file"
               else
-                 gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+                 gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file "$body_file"
               fi
