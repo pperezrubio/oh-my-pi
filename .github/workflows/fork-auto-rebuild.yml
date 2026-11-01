@@ -487,8 +487,9 @@ jobs:
                  # all refused), so the stack cannot reach the fork from here. Tag
                  # the release against the upstream commit it was built on — true
                  # by construction — and ship the stack diff as an asset instead.
-                 target="${TARGET_TAG}"
                  intended_sha="$(git rev-parse "refs/tags/${TARGET_TAG}^{commit}")"
+                 # --target takes a commitish; a tag name is rejected there.
+                 target="$intended_sha"
                  stack_state="built on upstream ${TARGET_TAG} with the stack patch attached (stack head ${head_sha})"
               fi
               if [ "$RETIRED" = "true" ]; then
