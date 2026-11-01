@@ -479,10 +479,17 @@ jobs:
               tag_state="${{ steps.push.outputs.tagged }}"
               if [ "$branch_state" = "true" ] || [ "$tag_state" = "true" ]; then
                  target="$head_sha"
+                 intended_sha="$head_sha"
                  stack_state="stack committed at ${head_sha} (branch=${branch_state} tag=${tag_state})"
               else
-                 target="${FIX_BRANCH}"
-                 stack_state="branch push rejected by the App token; artifact built from ${head_sha}"
+                 # No credential available in CI may introduce commits that touch
+                 # .github/workflows/** (App token, OAuth token and deploy key are
+                 # all refused), so the stack cannot reach the fork from here. Tag
+                 # the release against the upstream commit it was built on — true
+                 # by construction — and ship the stack diff as an asset instead.
+                 target="${TARGET_TAG}"
+                 intended_sha="$(git rev-parse "refs/tags/${TARGET_TAG}^{commit}")"
+                 stack_state="built on upstream ${TARGET_TAG} with the stack patch attached (stack head ${head_sha})"
               fi
               if [ "$RETIRED" = "true" ]; then
                  probe="stock upstream PASSES the regression battery - the patch is redundant and stock 'omp update' is safe"
@@ -501,13 +508,14 @@ jobs:
                  git log --oneline "${TARGET_TAG}..HEAD"
                  echo '```'
               } > "$notes"
-              artifacts="packages/coding-agent/binaries/omp-darwin-arm64 packages/coding-agent/binaries/SHA256SUMS.txt"
+              artifacts="packages/coding-agent/binaries/omp-darwin-arm64 packages/coding-agent/binaries/SHA256SUMS.txt STACK.patch"
+              git diff "${TARGET_TAG}" HEAD > STACK.patch
               # A release cannot be re-targeted later, so when the branch now
               # carries the artifact's commit but the existing release points
               # elsewhere, delete and recreate rather than upload onto a wrong tag.
               existing_tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${release_tag}" --jq .object.sha 2>/dev/null || true)"
-              if { [ "${{ steps.push.outputs.pushed }}" = "true" ] || [ "${{ steps.push.outputs.tagged }}" = "true" ]; } && gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-                 if [ -n "$existing_tag_sha" ] && [ "$existing_tag_sha" != "$head_sha" ]; then
+              if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+                 if [ -n "$existing_tag_sha" ] && [ "$existing_tag_sha" != "$intended_sha" ]; then
                     echo "::notice title=Re-tagging::existing release points at ${existing_tag_sha}, this artifact at ${head_sha}; recreating the tag"
                     gh release delete "$release_tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
                  fi
