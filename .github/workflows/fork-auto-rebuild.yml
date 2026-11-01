@@ -172,13 +172,13 @@ jobs:
               if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
               # One addon per invocation: several at once OOMs the link steps
               # (upstream hits this on their pods too, see ci.yml).
-              for target in linux-x64-baseline linux-x64-modern; do
+              for target in natives-linux-x64-baseline natives-linux-x64-modern; do
                  bazelisk --bazelrc="${{ steps.bazelrc.outputs.rc }}" \
                     build --repository_cache="$HOME/.cache/bazel-repo" --disk_cache="$HOME/.cache/bazel-disk" \
                     "//:${target}"
               done
               mkdir -p packages/natives/native
-              for target in linux-x64-baseline linux-x64-modern; do
+              for target in natives-linux-x64-baseline natives-linux-x64-modern; do
                  cp -L bazel-bin/"${target}"/*.node packages/natives/native/
               done
               ls -l packages/natives/native/
@@ -225,8 +225,8 @@ jobs:
               if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
               bazelisk --bazelrc="${{ steps.bazelrc.outputs.rc }}" \
                  build --repository_cache="$HOME/.cache/bazel-repo" --disk_cache="$HOME/.cache/bazel-disk" \
-                 //:darwin-arm64
-              cp -L bazel-bin/darwin-arm64/*.node packages/natives/native/
+                 //:natives-darwin-arm64
+              cp -L bazel-bin/natives-darwin-arm64/*.node packages/natives/native/
               file packages/natives/native/pi_natives.darwin-arm64.node
 
          - name: Build release binary
