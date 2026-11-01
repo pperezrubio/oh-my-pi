@@ -91,7 +91,7 @@ jobs:
                  exit 1
               fi
               target_sha="$(git rev-parse "refs/tags/${tag}^{commit}")"
-              base_sha="$(git rev-parse "origin/${FIX_BRANCH}~1")"
+              base_sha="$(git merge-base "origin/${FIX_BRANCH}" "refs/tags/${tag}^{commit}")"
               echo "tag=${tag}" >> "$GITHUB_OUTPUT"
               echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
               echo "sha=${target_sha}" >> "$GITHUB_OUTPUT"
@@ -118,14 +118,23 @@ jobs:
            run: |
               set -euo pipefail
               git checkout -B "$FIX_BRANCH" "origin/${FIX_BRANCH}"
-              base="$(git rev-parse "${FIX_BRANCH}~1")"
+              # The stack's fork point, never its tip's parent: with more than
+              # one patch, ~1 is the second patch and --onto would drop every
+              # commit below it.
+              base="$(git merge-base "$FIX_BRANCH" "${{ steps.target.outputs.sha }}")"
               if [ "$base" = "${{ steps.target.outputs.sha }}" ]; then
                  echo "Already rebased onto ${{ steps.target.outputs.tag }}; rebuild only."
                  exit 0
               fi
+              before_count="$(git rev-list --count "${FIX_BRANCH}" "^${base}")"
               # --empty=drop: a commit whose diff upstream already contains is
               # dropped, which is the exact signal the retirement probe reports.
               git rebase --empty=drop --onto "${{ steps.target.outputs.sha }}" "$base"
+              after_count="$(git rev-list --count HEAD "^${{ steps.target.outputs.sha }}")"
+              echo "stack commits before=${before_count} after=${after_count}"
+              if [ "${after_count}" -lt "${before_count}" ]; then
+                 echo "::notice title=Patch dropped::a stack commit was dropped as already present upstream"
+              fi
               echo "rebased head: $(git rev-parse HEAD)"
               git log --oneline "${{ steps.target.outputs.tag }}..HEAD" | tee "$GITHUB_STEP_SUMMARY"
 
