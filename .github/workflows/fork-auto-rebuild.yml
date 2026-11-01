@@ -407,15 +407,38 @@ jobs:
            id: push
            if: steps.target.outputs.current != 'true' || inputs.force == 'true'
            shell: bash
+           env:
+              # The GITHUB_TOKEN is a GitHub App token and cannot update a branch
+              # whose commits touch .github/workflows/** — a rebase onto a new tag
+              # always does (the branch tree then carries upstream's newer ci.yml).
+              # A write deploy key is used as the retry: a deploy-key push is not
+              # an App push, so the restriction does not apply.
+              FORK_DEPLOY_KEY: ${{ secrets.FORK_DEPLOY_KEY }}
            run: |
-              set -euo pipefail
-              if git push --force-with-lease="refs/heads/${FIX_BRANCH}:${{ steps.pre.outputs.before }}" \
-                    origin "refs/heads/${FIX_BRANCH}:refs/heads/${FIX_BRANCH}"; then
-                 echo "pushed=true" >> "$GITHUB_OUTPUT"
+              set -uo pipefail
+              lease="refs/heads/${FIX_BRANCH}:${{ steps.pre.outputs.before }}"
+              refspec="refs/heads/${FIX_BRANCH}:refs/heads/${FIX_BRANCH}"
+              pushed=false
+              if git push --force-with-lease="$lease" origin "$refspec"; then
+                 pushed=true
+                 echo "pushed with the workflow token"
               else
-                 echo "pushed=false" >> "$GITHUB_OUTPUT"
-                 echo "::warning title=Branch push rejected::the rebased stack stays local to this artifact; the release is tagged against ${FIX_BRANCH} and its commit SHA is recorded in the notes"
+                 echo "::warning title=Workflow token refused the push::retrying over the deploy key"
+                 if [ -n "${FORK_DEPLOY_KEY:-}" ]; then
+                    key="$RUNNER_TEMP/deploy_key"
+                    printf '%s\n' "$FORK_DEPLOY_KEY" > "$key"
+                    chmod 600 "$key"
+                    ssh-keyscan -t ed25519 github.com > "$RUNNER_TEMP/known_hosts" 2>/dev/null || true
+                    if GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts -o StrictHostKeyChecking=yes" \
+                          git push --force-with-lease="$lease" "git@github.com:${GITHUB_REPOSITORY}.git" "$refspec"; then
+                       pushed=true
+                       echo "pushed with the deploy key"
+                    fi
+                 else
+                    echo "::warning::no FORK_DEPLOY_KEY secret; the branch stays parked and the release tags the existing branch"
+                 fi
               fi
+              echo "pushed=${pushed}" >> "$GITHUB_OUTPUT"
 
          - name: Publish fork release
            if: steps.target.outputs.current != 'true' || inputs.force == 'true'
@@ -455,6 +478,16 @@ jobs:
                  echo '```'
               } > "$notes"
               artifacts="packages/coding-agent/binaries/omp-darwin-arm64 packages/coding-agent/binaries/SHA256SUMS.txt"
+              # A release cannot be re-targeted later, so when the branch now
+              # carries the artifact's commit but the existing release points
+              # elsewhere, delete and recreate rather than upload onto a wrong tag.
+              existing_tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${release_tag}" --jq .object.sha 2>/dev/null || true)"
+              if [ "${{ steps.push.outputs.pushed }}" = "true" ] && gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+                 if [ -n "$existing_tag_sha" ] && [ "$existing_tag_sha" != "$head_sha" ]; then
+                    echo "::notice title=Re-tagging::existing release points at ${existing_tag_sha}, this artifact at ${head_sha}; recreating the tag"
+                    gh release delete "$release_tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+                 fi
+              fi
               if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
                  gh release upload "$release_tag" $artifacts --repo "$GITHUB_REPOSITORY" --clobber
                  gh release edit "$release_tag" --repo "$GITHUB_REPOSITORY" --notes-file "$notes"
