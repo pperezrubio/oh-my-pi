@@ -182,6 +182,11 @@ jobs:
                  cp -L bazel-bin/"${target}"/*.node packages/natives/native/
               done
               ls -l packages/natives/native/
+              # Bazel emits the addon post-link, before the release stamp exists;
+              # the standalone-binary embedder rejects an unstamped addon.
+              for addon in packages/natives/native/*.node; do
+                 bun scripts/stamp-native-version.ts "$addon"
+              done
 
          - name: Retirement probe (stock tag vs fork regression battery)
            id: retire
@@ -227,6 +232,7 @@ jobs:
                  build --repository_cache="$HOME/.cache/bazel-repo" --disk_cache="$HOME/.cache/bazel-disk" \
                  //:natives-darwin-arm64
               cp -L bazel-bin/natives-darwin-arm64/*.node packages/natives/native/
+              bun scripts/stamp-native-version.ts packages/natives/native/pi_natives.darwin-arm64.node
               file packages/natives/native/pi_natives.darwin-arm64.node
 
          - name: Build release binary
