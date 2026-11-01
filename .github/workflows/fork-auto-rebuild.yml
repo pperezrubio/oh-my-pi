@@ -445,10 +445,22 @@ jobs:
                        echo "pushed with the deploy key"
                     fi
                  else
-                    echo "::warning::no FORK_DEPLOY_KEY secret; the branch stays parked and the release tags the existing branch"
+                    echo "::warning::no FORK_DEPLOY_KEY secret; trying the provenance tag alone"
+                 fi
+              fi
+              # Branch updates are refused by the workflow-file permission (App
+              # token and OAuth token alike), but TAG refs are exempt: a tag push
+              # uploads the stack commits so the artifact has a real remote commit
+              # to be released against, and it is immutable provenance.
+              if [ "$pushed" != true ]; then
+                 stack_tag="stack-${{ steps.target.outputs.version }}"
+                 if git push --force origin "HEAD:refs/tags/${stack_tag}"; then
+                    tagged=true
+                    echo "pushed the stack tag ${stack_tag} at $(git rev-parse HEAD)"
                  fi
               fi
               echo "pushed=${pushed}" >> "$GITHUB_OUTPUT"
+              echo "tagged=${tagged:-false}" >> "$GITHUB_OUTPUT"
 
          - name: Publish fork release
            if: steps.target.outputs.current != 'true' || inputs.force == 'true'
@@ -463,9 +475,11 @@ jobs:
               release_tag="${RELEASE_TAG_PREFIX}${TARGET_VERSION}"
               head_sha="$(git rev-parse HEAD)"
               notes="$RUNNER_TEMP/notes.md"
-              if [ "${{ steps.push.outputs.pushed }}" = "true" ]; then
+              branch_state="${{ steps.push.outputs.pushed }}"
+              tag_state="${{ steps.push.outputs.tagged }}"
+              if [ "$branch_state" = "true" ] || [ "$tag_state" = "true" ]; then
                  target="$head_sha"
-                 stack_state="branch ${FIX_BRANCH} pushed at ${head_sha}"
+                 stack_state="stack committed at ${head_sha} (branch=${branch_state} tag=${tag_state})"
               else
                  target="${FIX_BRANCH}"
                  stack_state="branch push rejected by the App token; artifact built from ${head_sha}"
@@ -492,7 +506,7 @@ jobs:
               # carries the artifact's commit but the existing release points
               # elsewhere, delete and recreate rather than upload onto a wrong tag.
               existing_tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${release_tag}" --jq .object.sha 2>/dev/null || true)"
-              if [ "${{ steps.push.outputs.pushed }}" = "true" ] && gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+              if { [ "${{ steps.push.outputs.pushed }}" = "true" ] || [ "${{ steps.push.outputs.tagged }}" = "true" ]; } && gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
                  if [ -n "$existing_tag_sha" ] && [ "$existing_tag_sha" != "$head_sha" ]; then
                     echo "::notice title=Re-tagging::existing release points at ${existing_tag_sha}, this artifact at ${head_sha}; recreating the tag"
                     gh release delete "$release_tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
