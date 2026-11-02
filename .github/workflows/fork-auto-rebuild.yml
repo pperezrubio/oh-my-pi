@@ -21,7 +21,19 @@ name: fork-auto-rebuild
 #   - Retirement is per patch and only reported when EVERY patch is redundant,
 #     because the todo fix passes a behavioural battery on the stock tree while
 #     the composer setting is detected by its registration upstream.
+#   - Trigger matrix: the `schedule` poll of the latest upstream release every 2h
+#     is the normal path, so a rebuild no longer depends on any machine being
+#     awake; `workflow_dispatch` from the laptop's `omp-fork-sync` script or from
+#     a human is the fallback (missed poll, upstream release while the repo is
+#     quiet) and the only way to force a rebuild of an already-current tag.
 on:
+   schedule:
+      # Upstream publishes roughly daily. Polling it here keeps rebuilds independent
+      # of the laptop (omp-fork-sync dispatches only as a fallback). The
+      # "Skip when already current" path below makes a poll that finds nothing new a
+      # ~2 minute no-op, and the `fork-auto-rebuild` concurrency group serialises it
+      # against a build already in progress.
+      - cron: "7 */2 * * *"
    workflow_dispatch:
       inputs:
          target_tag:
