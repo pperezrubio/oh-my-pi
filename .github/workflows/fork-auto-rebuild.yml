@@ -573,14 +573,61 @@ jobs:
               set -euo pipefail
               tag="${{ steps.target.outputs.tag }}"
               [ -n "$tag" ] || tag="unknown"
-              title="fork-auto-rebuild failed for ${tag}"
+              title="fork-auto-rebuild failing for ${tag}"
               body_file="$RUNNER_TEMP/failure-body.md"
-              printf 'Run: %s/%s/actions/runs/%s\n\nThe installed binary was NOT touched: a failed run changes the publication surface only, and the laptop sync installs nothing without a matching release asset.\n' \
-                 "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}" > "$body_file"
+              # Name the steps that failed: a tracker that only says "failed"
+              # forces every reader to open the run to learn anything.
+              steps_failed="$(gh run view "${GITHUB_RUN_ID}" --repo "$GITHUB_REPOSITORY" --json jobs \
+                 --jq '[.jobs[].steps[] | select(.conclusion == "failure") | "\(.number). \(.name)"] | join(", ")' 2>/dev/null || true)"
+              {
+                 echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+                 echo
+                 if [ -n "${steps_failed:-}" ]; then
+                    echo "Failing step(s): ${steps_failed}"
+                    echo
+                 fi
+                 echo "The installed binary was NOT touched: a failed run changes the publication surface only, and the laptop sync installs nothing without a matching release asset."
+              } > "$body_file"
+              # One tracking issue, one tracking comment. Every later failure
+              # EDITS that comment and retitles the issue to the current target;
+              # appending a fresh copy per run is what turned this tracker into a
+              # wall of identical lines (7 of them on 2026-11-06). Duplicates left
+              # by earlier runs are deleted here, so the issue converges to one.
               existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 --json number,title \
-                 | jq -r '.[] | select(.title | startswith("fork-auto-rebuild failed")) | .number' | head -n1)"
-              if [ -n "${existing:-}" ]; then
-                 gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body-file "$body_file"
-              else
+                 | jq -r '.[] | select(.title | test("^fork-auto-rebuild fail(ed|ing) ")) | .number' | head -n1)"
+              if [ -z "${existing:-}" ]; then
                  gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file "$body_file"
+                 exit 0
               fi
+              comment_ids="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${existing}/comments" --paginate \
+                 --jq '.[] | select(.user.type == "Bot") | .id' 2>/dev/null || true)"
+              first_comment="$(head -n1 <<< "${comment_ids:-}")"
+              if [ -n "${first_comment:-}" ]; then
+                 gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${first_comment}" -F "body=@${body_file}" > /dev/null
+                 tail -n +2 <<< "${comment_ids}" | while read -r duplicate; do
+                    if [ -n "${duplicate:-}" ]; then
+                       gh api -X DELETE "repos/${GITHUB_REPOSITORY}/issues/comments/${duplicate}" > /dev/null
+                    fi
+                 done
+              else
+                 gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body-file "$body_file"
+              fi
+              gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" --title "$title"
+
+         # The counterpart to Report failure: a tracker that stays open after the
+         # build recovers is the same noise as a duplicate comment, so crossing
+         # the end of the job closes it. Only fires on a green run, never on the
+         # failure path.
+         - name: Close the failure tracker once the job survives
+           if: success()
+           shell: bash
+           env:
+              GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              TARGET_TAG: ${{ steps.target.outputs.tag }}
+           run: |
+              set -euo pipefail
+              existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 --json number,title \
+                 | jq -r '.[] | select(.title | test("^fork-auto-rebuild fail(ed|ing) ")) | .number' | head -n1)"
+              [ -n "${existing:-}" ] || exit 0
+              gh issue close "$existing" --repo "$GITHUB_REPOSITORY" --reason completed \
+                 --comment "Recovered: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} completed green for ${TARGET_TAG:-the current target}."
