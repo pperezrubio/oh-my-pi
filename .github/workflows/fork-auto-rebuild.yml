@@ -629,5 +629,9 @@ jobs:
               existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 --json number,title \
                  | jq -r '.[] | select(.title | test("^fork-auto-rebuild fail(ed|ing) ")) | .number' | head -n1)"
               [ -n "${existing:-}" ] || exit 0
+              # The failure path named it "failing for <tag>"; a closed issue
+              # still wearing that title reads as an active outage.
+              gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" \
+                 --title "fork-auto-rebuild recovered for ${TARGET_TAG:-unknown}"
               gh issue close "$existing" --repo "$GITHUB_REPOSITORY" --reason completed \
                  --comment "Recovered: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} completed green for ${TARGET_TAG:-the current target}."
