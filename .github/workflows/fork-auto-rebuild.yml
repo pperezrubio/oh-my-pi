@@ -418,52 +418,71 @@ jobs:
               bun run check:tools
               bun scripts/ci-test-ts.ts local-ts
 
-         # The branch push is provenance, not the deliverable: the GITHUB_TOKEN is
-         # a GitHub App token and may refuse to update a branch whose commits touch
-         # .github/workflows/** (a rebase onto a new tag always does, because the
-         # branch tree then carries upstream's newer ci.yml). Publishing must not
-         # depend on that permission, so a rejected push is a warning and the
-         # release falls back to tagging the branch, with the stack SHA in the
-         # notes.
+         # The branch push is provenance, not the deliverable, but it is also the
+         # only way this fork ever receives upstream commits, so it has to land.
+         # GitHub refuses any push whose range touches .github/workflows/** unless
+         # the pushing credential carries the `workflow` scope. The GITHUB_TOKEN (a
+         # GitHub App installation token) is refused, and a write deploy key is
+         # refused too — a deploy-key retry is NOT exempt (verified 2026-11-09,
+         # when upstream v18.18.2 edited ci.yml: the branch push and the provenance
+         # tag push were both rejected). An account SSH key is not subject to that
+         # restriction, so FORK_PUSH_KEY (an account key, not a deploy key) is the
+         # primary credential; the App token and the deploy key stay as fallbacks
+         # for the case where upstream did not touch a workflow file.
          - name: Push rebased branch
            id: push
            if: steps.target.outputs.current != 'true' || inputs.force == 'true'
            shell: bash
            env:
-              # The GITHUB_TOKEN is a GitHub App token and cannot update a branch
-              # whose commits touch .github/workflows/** — a rebase onto a new tag
-              # always does (the branch tree then carries upstream's newer ci.yml).
-              # A write deploy key is used as the retry: a deploy-key push is not
-              # an App push, so the restriction does not apply.
+              FORK_PUSH_KEY: ${{ secrets.FORK_PUSH_KEY }}
               FORK_DEPLOY_KEY: ${{ secrets.FORK_DEPLOY_KEY }}
            run: |
               set -uo pipefail
               lease="refs/heads/${FIX_BRANCH}:${{ steps.pre.outputs.before }}"
               refspec="refs/heads/${FIX_BRANCH}:refs/heads/${FIX_BRANCH}"
+              ssh_url="git@github.com:${GITHUB_REPOSITORY}.git"
+              ssh-keyscan -t ed25519 github.com > "$RUNNER_TEMP/known_hosts" 2>/dev/null || true
+              # A secret key gets a pinned host key, no agent and no other
+              # identities: the runner trusts nothing it did not see itself.
+              ssh_push() {
+                 local key="$1"
+                 shift
+                 GIT_SSH_COMMAND="ssh -i ${key} -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts -o StrictHostKeyChecking=yes" \
+                    git push "$@"
+              }
+              write_key() {
+                 printf '%s\n' "$1" > "$2"
+                 chmod 600 "$2"
+              }
               pushed=false
-              if git push --force-with-lease="$lease" origin "$refspec"; then
-                 pushed=true
-                 echo "pushed with the workflow token"
+              tagged=false
+              if [ -n "${FORK_PUSH_KEY:-}" ]; then
+                 write_key "$FORK_PUSH_KEY" "$RUNNER_TEMP/push_key"
+                 if ssh_push "$RUNNER_TEMP/push_key" --force-with-lease="$lease" "$ssh_url" "$refspec"; then
+                    pushed=true
+                    echo "pushed with the account key"
+                 else
+                    echo "::warning title=Account key refused the push::falling back to the workflow token"
+                 fi
               else
-                 echo "::warning title=Workflow token refused the push::retrying over the deploy key"
-                 if [ -n "${FORK_DEPLOY_KEY:-}" ]; then
-                    key="$RUNNER_TEMP/deploy_key"
-                    printf '%s\n' "$FORK_DEPLOY_KEY" > "$key"
-                    chmod 600 "$key"
-                    ssh-keyscan -t ed25519 github.com > "$RUNNER_TEMP/known_hosts" 2>/dev/null || true
-                    if GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts -o StrictHostKeyChecking=yes" \
-                          git push --force-with-lease="$lease" "git@github.com:${GITHUB_REPOSITORY}.git" "$refspec"; then
+                 echo "::warning::no FORK_PUSH_KEY secret; the workflow token cannot carry workflow-file changes"
+              fi
+              if [ "$pushed" != true ]; then
+                 if git push --force-with-lease="$lease" origin "$refspec"; then
+                    pushed=true
+                    echo "pushed with the workflow token"
+                 elif [ -n "${FORK_DEPLOY_KEY:-}" ]; then
+                    echo "::warning title=Workflow token refused the push::retrying over the deploy key"
+                    write_key "$FORK_DEPLOY_KEY" "$RUNNER_TEMP/deploy_key"
+                    if ssh_push "$RUNNER_TEMP/deploy_key" --force-with-lease="$lease" "$ssh_url" "$refspec"; then
                        pushed=true
                        echo "pushed with the deploy key"
                     fi
-                 else
-                    echo "::warning::no FORK_DEPLOY_KEY secret; trying the provenance tag alone"
                  fi
               fi
-              # Branch updates are refused by the workflow-file permission (App
-              # token and OAuth token alike), but TAG refs are exempt: a tag push
-              # uploads the stack commits so the artifact has a real remote commit
-              # to be released against, and it is immutable provenance.
+              # Last resort: a provenance tag. It is NOT exempt from the workflow
+              # rule either (a tag introducing the same commits is refused the same
+              # way), but it still covers a repository that only protects branches.
               if [ "$pushed" != true ]; then
                  stack_tag="stack-${{ steps.target.outputs.version }}"
                  if git push --force origin "HEAD:refs/tags/${stack_tag}"; then
@@ -472,7 +491,7 @@ jobs:
                  fi
               fi
               echo "pushed=${pushed}" >> "$GITHUB_OUTPUT"
-              echo "tagged=${tagged:-false}" >> "$GITHUB_OUTPUT"
+              echo "tagged=${tagged}" >> "$GITHUB_OUTPUT"
 
          - name: Publish fork release
            if: steps.target.outputs.current != 'true' || inputs.force == 'true'
@@ -494,15 +513,41 @@ jobs:
                  intended_sha="$head_sha"
                  stack_state="stack committed at ${head_sha} (branch=${branch_state} tag=${tag_state})"
               else
-                 # No credential available in CI may introduce commits that touch
-                 # .github/workflows/** (App token, OAuth token and deploy key are
-                 # all refused), so the stack cannot reach the fork from here. Tag
-                 # the release against the upstream commit it was built on — true
-                 # by construction — and ship the stack diff as an asset instead.
-                 intended_sha="$(git rev-parse "refs/tags/${TARGET_TAG}^{commit}")"
-                 # --target takes a commitish; a tag name is rejected there.
+                 intended_sha=""
+                 stack_state=""
+              fi
+              # A release cannot be targeted at a commit this repository does not
+              # carry: the API answers 403 "Resource not accessible by integration"
+              # when target_commitish is a commit that only exists upstream (hit
+              # 2026-11-09, when the v18.18.2 rebase could not be pushed and the
+              # release fell back to the upstream sha). Anchor the tag on the most
+              # specific commit the fork actually has, and say which one in the
+              # notes.
+              fork_has_commit() {
+                 gh api "repos/${GITHUB_REPOSITORY}/git/commits/$1" --jq .sha > /dev/null 2>&1
+              }
+              if [ -z "$intended_sha" ] || ! fork_has_commit "$intended_sha"; then
+                 if [ -z "$intended_sha" ]; then
+                    anchor_why="the stack could not be pushed, so the artifact has no commit of its own here"
+                 else
+                    anchor_why="stack head ${head_sha} is not in this repository"
+                 fi
+                 intended_sha=""
+                 for candidate in "${{ steps.pre.outputs.before }}" \
+                                   "$(git rev-parse refs/remotes/origin/main 2>/dev/null || true)" \
+                                   "$(git rev-parse "refs/tags/${TARGET_TAG}^{commit}" 2>/dev/null || true)"; do
+                    [ -n "$candidate" ] || continue
+                    if fork_has_commit "$candidate"; then
+                       intended_sha="$candidate"
+                       break
+                    fi
+                 done
+                 if [ -z "$intended_sha" ]; then
+                    echo "::error::no commit of ${GITHUB_REPOSITORY} is available to target ${release_tag}"
+                    exit 1
+                 fi
                  target="$intended_sha"
-                 stack_state="built on upstream ${TARGET_TAG} with the stack patch attached (stack head ${head_sha})"
+                 stack_state="built on upstream ${TARGET_TAG} with the stack patch attached (${anchor_why}); release anchored at ${intended_sha}"
               fi
               if [ "$RETIRED" = "true" ]; then
                  probe="stock upstream PASSES the regression battery - the patch is redundant and stock 'omp update' is safe"
