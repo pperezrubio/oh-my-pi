@@ -7,9 +7,12 @@ name: fork-auto-rebuild
 # the todo item-shape fix (upstream #16279), the opt-in
 # composer.terminalForeground setting that keeps typed text on the terminal's own
 # foreground in shared multiplexer panes, and a test-only fix: the background-tab
-# screenshot test asserted `visibilityState === "hidden"` on a tab omp drives,
-# which focus emulation reports as "visible" (upstream's own CI never runs that
-# suite, so it never surfaced there). Artifacts are published as fork
+# screenshot test asserted `visibilityState === "hidden"` on a tab omp drives
+# while upstream's sibling test for the same adoption already asserts "visible"
+# (338a5b19e2, v18.18.6) — the adopted tab runs focus emulation
+# (`Emulation.setFocusEmulationEnabled`: a focused AND active page), so the
+# hidden expectation was stale and only surfaces where the browser suites
+# actually execute. Artifacts are published as fork
 # releases (`fork-<version>`) and consumed by the laptop-side `omp-fork-sync`
 # script, which force-owns ~/.bun/bin/omp while the fork is live.
 #
@@ -23,7 +26,10 @@ name: fork-auto-rebuild
 #     conflicting rebase stops the run before anything is pushed or published.
 #   - Retirement is per patch and only reported when EVERY patch is redundant,
 #     because the todo fix passes a behavioural battery on the stock tree while
-#     the composer setting is detected by its registration upstream.
+#     the composer setting is detected by its registration upstream. The
+#     test-only fix has no probe: an upstream rewrite of that assertion either
+#     makes the commit empty (dropped by --empty=drop) or conflicts, and a
+#     conflict stops the run before anything is pushed or published.
 #   - Trigger matrix: the `schedule` poll of the latest upstream release every 2h
 #     is the normal path, so a rebuild no longer depends on any machine being
 #     awake; `workflow_dispatch` from the laptop's `omp-fork-sync` script or from
@@ -420,13 +426,13 @@ jobs:
               set -euo pipefail
               bun run check:tools
               # The battery launches a real Chromium for its browser suites, and
-              # whether they run at all turns on `chromiumAvailable()`'s 5 s CDP
-              # probe: upstream's GitHub-hosted jobs miss that probe and skip
-              # them, so this job is the only place they execute, and a 2-core
-              # runner is the most brittle host they run on. One retry absorbs a
-              # transient browser or CPU hiccup without hiding a regression —
-              # anything real fails both attempts (same form as the bun-install
-              # retry in .github/actions/bun-install).
+              # those suites run only where `chromiumAvailable()`'s 5 s CDP probe
+              # passes — chromium-probe.ts documents hosted runners that hold the
+              # downloaded binary but cannot exec it, and this job's probe does
+              # pass. One retry absorbs a transient browser or CPU hiccup on a
+              # 2-core runner without hiding a regression: anything real fails
+              # both attempts (same form as the bun-install retry in
+              # .github/actions/bun-install).
               attempt=1
               while :; do
                  if bun scripts/ci-test-ts.ts local-ts; then
