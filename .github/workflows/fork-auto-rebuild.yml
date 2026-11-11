@@ -30,7 +30,12 @@ name: fork-auto-rebuild
 #     the composer setting is detected by its registration upstream. The
 #     test-only fix has no probe: an upstream rewrite of that assertion either
 #     makes the commit empty (dropped by --empty=drop) or conflicts, and a
-#     conflict stops the run before anything is pushed or published.
+#     conflict stops the run before anything is pushed or published. The
+#     composer changelog commit needs the same hand: it adds a `### Added`
+#     heading plus its bullet, while the merged PR puts the bullet in upstream's
+#     own section, so --empty=drop cannot see it as present and the next rebase
+#     conflicts or duplicates the heading. Drop that commit by hand when #18493
+#     lands.
 #   - Reproduce a red battery on the laptop instead of here: `bun install
 #     --frozen-lockfile`, then stage the darwin addon from the exact npm leaf
 #     (`@oh-my-pi/pi-natives-darwin-arm64@<version>`, copy the .node into
