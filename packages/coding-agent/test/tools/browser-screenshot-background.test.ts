@@ -99,11 +99,19 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser screenshots of background tabs", (
 		cleanups.push(async () => {
 			await releaseTab(name);
 		});
+		// Setup guard: the tab this captures is a background tab, not the one on screen.
+		expect(await visibility(agentPage)).toBe("hidden");
 		await acquireTab(name, handle, { target: "agent-tab", timeoutMs: 30_000 });
 
 		expect(await repaintAndCapture(name, "#00ff00")).toEqual([0, 255, 0]);
+		// The user's tab staying visible is what proves the capture did not raise
+		// ours: Chromium hides this tab as soon as another one becomes the active
+		// tab. The agent tab's own `visibilityState` cannot carry that signal —
+		// adoption turns on focus emulation for it
+		// (`Emulation.setFocusEmulationEnabled`, which simulates a focused and
+		// ACTIVE page), and a focus-emulated background tab reports "visible"
+		// (Chromium 150, macOS and Linux, measured 2026-11-11).
 		expect(await visibility(userPage)).toBe("visible");
-		expect(await visibility(agentPage)).toBe("hidden");
 	}, 45_000);
 
 	it("captures the adopted tab after the user switched away from it", async () => {
