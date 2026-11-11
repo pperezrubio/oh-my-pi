@@ -3,10 +3,11 @@ name: fork-auto-rebuild
 # Rebuilds this fork's local patch stack (fix/local-patch-stack) on every
 # upstream release, so the installed binary always carries the newest upstream
 # version *and* every open local patch, until each patch lands upstream (via the
-# fork's own PRs or an equivalent fix). The stack currently holds three commits:
-# the todo item-shape fix (upstream #16279), the opt-in
+# fork's own PRs or an equivalent fix). The stack currently holds three patches in
+# four commits: the todo item-shape fix (upstream #16279); the opt-in
 # composer.terminalForeground setting that keeps typed text on the terminal's own
-# foreground in shared multiplexer panes, and a test-only fix: the background-tab
+# foreground in shared multiplexer panes, with its changelog entry; and a
+# test-only fix: the background-tab
 # screenshot test asserted `visibilityState === "hidden"` on a tab omp drives
 # while upstream's sibling test for the same adoption already asserts "visible"
 # (338a5b19e2, v18.18.6) — the adopted tab runs focus emulation
@@ -533,6 +534,11 @@ jobs:
               set -euo pipefail
               release_tag="${RELEASE_TAG_PREFIX}${TARGET_VERSION}"
               head_sha="$(git rev-parse HEAD)"
+              # Title honesty: the stack grows and shrinks (commits are added when a
+              # new local fix appears, dropped when upstream lands one), so count it
+              # here instead of hardcoding a number that goes stale the next time a
+              # patch is added.
+              stack_commits="$(git rev-list --count "${TARGET_TAG}..HEAD")"
               notes="$RUNNER_TEMP/notes.md"
               branch_state="${{ steps.push.outputs.pushed }}"
               tag_state="${{ steps.push.outputs.tagged }}"
@@ -612,7 +618,7 @@ jobs:
               else
                  gh release create "$release_tag" $artifacts --repo "$GITHUB_REPOSITORY" \
                     --target "$target" \
-                    --title "omp ${{ steps.target.outputs.version }} + 2 local patches" \
+                    --title "omp ${{ steps.target.outputs.version }} + ${stack_commits} local commits" \
                     --notes-file "$notes"
               fi
               echo "Published: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${release_tag}" >> "$GITHUB_STEP_SUMMARY"
@@ -625,9 +631,9 @@ jobs:
               TARGET_TAG: ${{ steps.target.outputs.tag }}
            run: |
               set -euo pipefail
-              title="Retire fork: upstream ${TARGET_TAG} covers both local patches"
+              title="Retire fork: upstream ${TARGET_TAG} covers every local patch"
               body_file="$RUNNER_TEMP/retire-body.md"
-              printf 'Both fork patches are now redundant on the stock upstream tree (%s): the todo-shape regression battery passes there and the composer.terminalForeground setting is registered upstream, so %s adds nothing.\n\nNext step: run `omp update` to return to stock binaries, delete the omp-fork-sync LaunchAgent and script from the dotfiles, and delete this workflow.\n' \
+              printf 'Every probe-able fork patch is now redundant on the stock upstream tree (%s): the todo-shape regression battery passes there and the composer.terminalForeground setting is registered upstream, so %s adds nothing. Check the test-only commit (the background-tab screenshot visibility assertion) before deleting the workflow: it has no probe.\n\nNext step: run `omp update` to return to stock binaries, delete the omp-fork-sync LaunchAgent and script from the dotfiles, and delete this workflow.\n' \
                  'todo.test.ts' "$FIX_BRANCH" > "$body_file"
               existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 --json number,title \
                  | jq -r '.[] | select(.title | startswith("Retire fork:")) | .number' | head -n1)"
