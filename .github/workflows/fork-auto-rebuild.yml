@@ -3,10 +3,13 @@ name: fork-auto-rebuild
 # Rebuilds this fork's local patch stack (fix/local-patch-stack) on every
 # upstream release, so the installed binary always carries the newest upstream
 # version *and* every open local patch, until each patch lands upstream (via the
-# fork's own PRs or an equivalent fix). The stack currently holds two patches:
-# the todo item-shape fix (upstream #16279) and the opt-in
+# fork's own PRs or an equivalent fix). The stack currently holds three commits:
+# the todo item-shape fix (upstream #16279), the opt-in
 # composer.terminalForeground setting that keeps typed text on the terminal's own
-# foreground in shared multiplexer panes. Artifacts are published as fork
+# foreground in shared multiplexer panes, and a test-only fix: the background-tab
+# screenshot test asserted `visibilityState === "hidden"` on a tab omp drives,
+# which focus emulation reports as "visible" (upstream's own CI never runs that
+# suite, so it never surfaced there). Artifacts are published as fork
 # releases (`fork-<version>`) and consumed by the laptop-side `omp-fork-sync`
 # script, which force-owns ~/.bun/bin/omp while the fork is live.
 #
@@ -416,7 +419,26 @@ jobs:
            run: |
               set -euo pipefail
               bun run check:tools
-              bun scripts/ci-test-ts.ts local-ts
+              # The battery launches a real Chromium for its browser suites, and
+              # whether they run at all turns on `chromiumAvailable()`'s 5 s CDP
+              # probe: upstream's GitHub-hosted jobs miss that probe and skip
+              # them, so this job is the only place they execute, and a 2-core
+              # runner is the most brittle host they run on. One retry absorbs a
+              # transient browser or CPU hiccup without hiding a regression —
+              # anything real fails both attempts (same form as the bun-install
+              # retry in .github/actions/bun-install).
+              attempt=1
+              while :; do
+                 if bun scripts/ci-test-ts.ts local-ts; then
+                    break
+                 fi
+                 if [ "$attempt" -ge 2 ]; then
+                    echo "::error title=Test battery failed twice::the battery is red on attempt ${attempt}; treating it as a regression"
+                    exit 1
+                 fi
+                 attempt=$((attempt + 1))
+                 echo "::warning title=Test battery retry::the battery failed; retrying once (attempt ${attempt}/2)"
+              done
 
          # The branch push is provenance, not the deliverable, but it is also the
          # only way this fork ever receives upstream commits, so it has to land.
