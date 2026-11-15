@@ -452,11 +452,13 @@ jobs:
          # The browser bucket must not use the runner image's Chrome: on
          # 2026-11-15 that was 157.0.8103.78, which no longer honours
          # `--enable-features=WebMCPTesting`, so all nine browser-webmcp tests
-         # failed on both attempts while the same suites pass on the Chrome for
-         # Testing build puppeteer-core pins (150.0.7871.24). Upstream's own
-         # runners (`omp-kata`) carry the pinned image; GitHub-hosted runners do
-         # not, so the env override below is what makes the battery a function of
-         # the lockfile instead of the calendar.
+         # failed on both attempts while those same ten files pass on the Chrome
+         # for Testing build puppeteer-core pins (150.0.7871.24, 57 pass / 2 skip
+         # / 0 fail with PUPPETEER_EXECUTABLE_PATH set to it). This is not this
+         # fork's stack: upstream's own PR-event CI, on the same ubuntu-22.04
+         # image, failed the identical chunk 89/113 the same morning
+         # (can1357/oh-my-pi run 43699739577, 09:36Z). The env override below
+         # makes the battery a function of the lockfile instead of the calendar.
          - name: Pin the battery's Chromium to the managed Chrome for Testing
            if: steps.target.outputs.current != 'true' || inputs.force == 'true'
            shell: bash
