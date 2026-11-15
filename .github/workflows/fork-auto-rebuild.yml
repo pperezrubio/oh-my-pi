@@ -29,11 +29,13 @@ name: fork-auto-rebuild
 #     this workflow file exists only on the default branch, so the stack's
 #     working tree does not carry it — read it with
 #     `git show fork/main:.github/workflows/fork-auto-rebuild.yml`, never `sed`
-#     on the checked-out tree. Push the result with a plain
-#     `git push --force-with-lease fork <branch>`: the explicit
-#     `--force-with-lease=<branch>:<sha>` form was refused with "the tip of your
-#     current branch is behind its remote counterpart" even though the recorded
-#     SHA matched, and the same push succeeded without the explicit lease.
+#     on the checked-out tree. Lease the push against the REMOTE-side ref name:
+#     `git push --force-with-lease=fix/local-patch-stack:<sha> fork
+#     fix/local-patch-stack`. A remote-tracking nickname in the lease
+#     (`--force-with-lease=fork/fix/local-patch-stack:<sha>`) matches no lease for
+#     the pushed ref, so git degrades to a plain push and reports "the tip of
+#     your current branch is behind its remote counterpart"; the right refname
+#     with a wrong SHA is refused as `stale info`. Both forms probed 2026-11-15.
 #   - Retirement is per patch and only reported when EVERY patch is redundant,
 #     because the todo fix passes a behavioural battery on the stock tree while
 #     the composer setting is detected by its registration upstream. The
