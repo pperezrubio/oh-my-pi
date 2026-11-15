@@ -448,6 +448,39 @@ jobs:
          # The battery runs after the artifact is built and asserted, so an
          # artifact problem surfaces in minutes instead of after 30 minutes of
          # tests; nothing is pushed or published until both are green.
+         #
+         # The browser bucket must not use the runner image's Chrome: on
+         # 2026-11-15 that was 157.0.8103.78, which no longer honours
+         # `--enable-features=WebMCPTesting`, so all nine browser-webmcp tests
+         # failed on both attempts while the same suites pass on the Chrome for
+         # Testing build puppeteer-core pins (150.0.7871.24). Upstream's own
+         # runners (`omp-kata`) carry the pinned image; GitHub-hosted runners do
+         # not, so the env override below is what makes the battery a function of
+         # the lockfile instead of the calendar.
+         - name: Pin the battery's Chromium to the managed Chrome for Testing
+           if: steps.target.outputs.current != 'true' || inputs.force == 'true'
+           shell: bash
+           run: |
+              set -euo pipefail
+              if command -v google-chrome > /dev/null; then google-chrome --version || true; fi
+              resolved="$(cd packages/coding-agent && bun -e '
+                 const fs = await import("node:fs");
+                 const { getPuppeteerDir } = await import("@oh-my-pi/pi-utils");
+                 const browsers = await import("@oh-my-pi/pi-utils/browsers");
+                 const { PUPPETEER_REVISIONS } = await import("puppeteer-core/internal/revisions.js");
+                 const platform = browsers.detectBrowserPlatform();
+                 const cacheDir = getPuppeteerDir();
+                 const buildId = PUPPETEER_REVISIONS.chrome;
+                 const executablePath = browsers.computeExecutablePath({ buildId, cacheDir, platform });
+                 if (!fs.existsSync(executablePath)) await browsers.install({ buildId, cacheDir, platform });
+                 console.log(executablePath);
+              ')"
+              file_type="$(file "$resolved" 2>/dev/null || true)"
+              echo "managed chromium: $resolved"
+              echo "$file_type"
+              echo "PUPPETEER_EXECUTABLE_PATH=$resolved" >> "$GITHUB_ENV"
+              "$resolved" --version
+
          - name: Test battery and lint
            if: steps.target.outputs.current != 'true' || inputs.force == 'true'
            shell: bash
