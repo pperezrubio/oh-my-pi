@@ -41,6 +41,9 @@
 
 - Fixed fallback model selection so roles are offered only models they can use, excluding incompatible image and speech models.
 - Fixed macOS spelling assistance, autocorrect, replacements, and word completion for shell (`!`) and Python (`$`) drafts.
+### Added
+
+- The composer can keep typed text on each terminal's own foreground colour instead of a fixed near-white or black when the theme `text` token is empty, so a session shared across terminals with different backgrounds stays readable (`composer.terminalForeground`, off by default) ([#18493](https://github.com/can1357/oh-my-pi/pull/18493) by [@pperezrubio](https://github.com/pperezrubio))
 
 ## [18.20.1] - 2026-11-14
 
@@ -169,9 +172,6 @@
 - Fixed `xd://<device>:raw` and `xd://<device>:conflicts` resolving as that device. Those suffixes stay in the name, so the read or write no longer runs the device ([#18561](https://github.com/can1357/oh-my-pi/pull/18561) by [@wisehead](https://github.com/wisehead))
 - Fixed `ask` HTML forms taller than the composer area being cut off and unscrollable in Tern: the form now scrolls in the composer's place, and Cancel/Submit stay visible
 - Fixed the Agent Hub in Tern freezing itself and the session behind it once hundreds of agents are listed: moving the selection no longer re-sends every roster row, and live roster updates on large hubs are batched (up to once a second) so the terminal keeps up
-### Added
-
-- The composer can keep typed text on each terminal's own foreground colour instead of a fixed near-white or black when the theme `text` token is empty, so a session shared across terminals with different backgrounds stays readable (`composer.terminalForeground`, off by default) ([#18493](https://github.com/can1357/oh-my-pi/pull/18493) by [@pperezrubio](https://github.com/pperezrubio))
 
 ## [18.18.3] - 2026-11-09
 
