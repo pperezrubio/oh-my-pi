@@ -49,7 +49,10 @@ variables:
   NEXUS_DOCKER_GROUP: "nexus-nexus3.nexus.svc.cluster.local:8083"
   NEXUS_DOCKER_HOSTED: "nexus-nexus3.nexus.svc.cluster.local:8082"
   # Full literal (no nested expansion) so the repair job's image: can share it.
-  OMP_BUILDER_IMAGE: "gitlab-registry.gitlab.svc.cluster.local:5000/pedro/oh-my-pi/omp-fork-builder:latest"
+  # :ci is the rolling tag (cluster policy audit-ban-latest-tag fails pods that
+  # reference :latest); :${CI_COMMIT_SHORT_SHA} pins the exact build for
+  # reproductions.
+  OMP_BUILDER_IMAGE: "gitlab-registry.gitlab.svc.cluster.local:5000/pedro/oh-my-pi/omp-fork-builder:ci"
   # Ported verbatim from the GH workflow env: block.
   UPSTREAM_REPO: "can1357/oh-my-pi"
   FIX_BRANCH: "fix/local-patch-stack"
@@ -110,7 +113,7 @@ build:omp-fork-builder:
         --frontend dockerfile.v0 \
         --local context=${CI_PROJECT_DIR}/images/${IMAGE_NAME} \
         --local dockerfile=${CI_PROJECT_DIR}/images/${IMAGE_NAME} \
-        --output "type=image,name=${DEPLOY_IMAGE}:latest,push=true" \
+        --output "type=image,name=${DEPLOY_IMAGE}:ci,push=true" \
         --output "type=image,name=${DEPLOY_IMAGE}:${CI_COMMIT_SHORT_SHA},push=true" \
         --import-cache "type=registry,ref=${CACHE_REPO}" \
         --export-cache "type=registry,ref=${CACHE_REPO},mode=max,ignore-error=true" 2>&1 | tee /tmp/build.log
