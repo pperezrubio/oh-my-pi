@@ -753,9 +753,14 @@ rebuild:
       cd "${CI_PROJECT_DIR}" || { echo "[warning] workspace missing; failure tracking skipped"; exit 0; }
       [ -n "${FORK_GL_TOKEN:-}" ] || { echo "[warning] FORK_GL_TOKEN unset; failure tracking skipped"; exit 0; }
       tag="unknown"
+      release_tag=""
       [ -f .fork-rebuild-state ] && while IFS='=' read -r k v; do
-        case "$k" in TARGET_TAG|RELEASE_TAG) eval "$k=\$v" ;; esac
+        case "$k" in
+          TARGET_TAG) tag="$v" ;;
+          RELEASE_TAG) release_tag="$v" ;;
+        esac
       done < .fork-rebuild-state
+      echo "tracker target: tag=${tag} release=${release_tag:-unset}"
       gh_username="$(curl -sS -H "PRIVATE-TOKEN: ${FORK_GL_TOKEN}" "${CI_API_V4_URL}/user" | jq -r .username)"
       api() { # api <METHOD> <path> [extra curl args...]
         HTTP_CODE="$(curl -sS -o /tmp/after-body -w '%{http_code}' -X "$1" \
