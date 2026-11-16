@@ -1,0 +1,796 @@
+# =============================================================================
+# oh-my-pi fork auto-rebuild — GitLab port of .github/workflows/fork-auto-rebuild.yml
+# =============================================================================
+# Rebuilds the fork's local patch stack (fix/local-patch-stack) on every
+# upstream release and publishes fork-<upstream-version> releases consumed by
+# the laptop-side omp-fork-sync script. Ported 2026-11-16 from the GitHub
+# Actions workflow on fork/main; the step logic there encodes months of
+# hard-won fixes — it is translated construct-by-construct below (search for
+# the GH step names in the comments), not reimplemented.
+#
+# Trigger matrix:
+#   schedule: daily pipeline schedule on main (polls the upstream release; the
+#             skip-when-current path makes a no-op poll a ~2 minute job)
+#   web/api:  manual run with FORCE=1 to bypass skip-when-current, or the
+#             repair job triggering via FORK_GL_TOKEN
+# Skip-when-current: the fork-<upstream-version> release tag IS the
+# idempotency key — observing an upstream change is not a build request.
+#
+# The repair job lives in .gitlab/repair-job.yml (owned by the repair slice):
+# it is `stage: .post`, `needs: [rebuild]`, `when: on_failure`, sharing the
+# fork-auto-rebuild resource group, and references this pipeline's
+# OMP_BUILDER_IMAGE. It is deliberately NOT included here yet: include:local
+# has no missing-file guard and the file is absent on ci/gitlab-port, so the
+# include is added when both branches merge to main:
+#
+#   include:
+#     - local: .gitlab/repair-job.yml
+
+workflow:
+  auto_cancel:
+    on_new_commit: interruptible
+  rules:
+    # schedule (daily poll), web (manual FORCE=1), api/trigger (repair slice
+    # via FORK_GL_TOKEN). Pushes to fix/local-patch-stack itself create NO
+    # pipeline — that branch is only ever written by the rebuild job.
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_PIPELINE_SOURCE == "api"
+    - if: $CI_PIPELINE_SOURCE == "trigger"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+stages:
+  - prepare
+  - rebuild
+
+variables:
+  BUILDKIT_VERSION: "v0.32.2"
+  DEPLOY_REGISTRY: "gitlab-registry.gitlab.svc.cluster.local:5000"
+  NEXUS_DOCKER_GROUP: "nexus-nexus3.nexus.svc.cluster.local:8083"
+  NEXUS_DOCKER_HOSTED: "nexus-nexus3.nexus.svc.cluster.local:8082"
+  # Full literal (no nested expansion) so the repair job's image: can share it.
+  OMP_BUILDER_IMAGE: "gitlab-registry.gitlab.svc.cluster.local:5000/pedro/oh-my-pi/omp-fork-builder:latest"
+  # Ported verbatim from the GH workflow env: block.
+  UPSTREAM_REPO: "can1357/oh-my-pi"
+  FIX_BRANCH: "fix/local-patch-stack"
+  RELEASE_TAG_PREFIX: "fork-"
+  # Upstream's per-test wall-clock ceiling (see ci.yml).
+  OMP_TEST_TIMEOUT: "120"
+
+default:
+  tags:
+    - kubernetes
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
+      - runner_external_dependency_failure
+      - scheduler_failure
+      - job_execution_server_timeout
+      - stuck_pending_with_matching_runners
+    exit_codes:
+      - 137
+      - 255
+
+# =============================================================================
+# prepare — builder image (rootless BuildKit, golden template; Kaniko is
+# prohibited on this cluster). Only runs on changes to images/** or when
+# BUILD_IMAGE=1 is passed to force a rebuild.
+# =============================================================================
+build:omp-fork-builder:
+  stage: prepare
+  image:
+    name: moby/buildkit:${BUILDKIT_VERSION}-rootless
+    entrypoint: [""]
+  needs: []
+  resource_group: buildkit-lane0
+  interruptible: true
+  variables:
+    BUILDKITD_FLAGS: --oci-worker-no-process-sandbox
+    IMAGE_NAME: omp-fork-builder
+  before_script:
+    - mkdir -p /home/user/.local/share/buildkit /home/user/.config/buildkit
+    - |
+      printf '[registry."docker.io"]\n  mirrors = ["%s"]\n[registry."%s"]\n  http = true\n  insecure = true\n[registry."%s"]\n  http = true\n  insecure = true\n[registry."gitlab-registry.gitlab.svc.cluster.local:5000"]\n  http = true\n  insecure = true\n[registry."gcr.io"]\n  mirrors = ["%s"]\n[registry."ghcr.io"]\n  mirrors = ["%s"]\n[registry."quay.io"]\n  mirrors = ["%s"]\n[registry."registry.k8s.io"]\n  mirrors = ["%s"]\n[registry."mcr.microsoft.com"]\n  mirrors = ["%s"]\n[registry."cgr.dev"]\n  mirrors = ["%s"]\n[registry."mirror.gcr.io"]\n  mirrors = ["%s"]\n' \
+        "${NEXUS_DOCKER_GROUP}" "${NEXUS_DOCKER_GROUP}" "${NEXUS_DOCKER_HOSTED}" "${NEXUS_DOCKER_GROUP}" "${NEXUS_DOCKER_GROUP}" "${NEXUS_DOCKER_GROUP}" "${NEXUS_DOCKER_GROUP}" "${NEXUS_DOCKER_GROUP}" "${NEXUS_DOCKER_GROUP}" "${NEXUS_DOCKER_GROUP}" \
+        > /home/user/.config/buildkit/buildkitd.toml
+    - cat /home/user/.config/buildkit/buildkitd.toml
+    - |
+      mkdir -p /home/user/.docker
+      printf '{"auths":{"%s":{"username":"admin","password":"%s"},"%s":{"username":"admin","password":"%s"},"%s":{"username":"%s","password":"%s"}}}\n' \
+        "${NEXUS_DOCKER_HOSTED}" "${NEXUS_PASSWORD}" "${NEXUS_DOCKER_GROUP}" "${NEXUS_PASSWORD}" \
+        "${DEPLOY_REGISTRY}" "${CI_REGISTRY_USER}" "${CI_REGISTRY_PASSWORD}" \
+        > /home/user/.docker/config.json
+  script:
+    - DEPLOY_IMAGE="${DEPLOY_REGISTRY}/${CI_PROJECT_PATH}/${IMAGE_NAME}"
+    - CACHE_REPO="${DEPLOY_IMAGE}-cache"
+    - |
+      buildctl-daemonless.sh \
+        build \
+        --frontend dockerfile.v0 \
+        --local context=${CI_PROJECT_DIR}/images/${IMAGE_NAME} \
+        --local dockerfile=${CI_PROJECT_DIR}/images/${IMAGE_NAME} \
+        --output "type=image,name=${DEPLOY_IMAGE}:latest,push=true" \
+        --output "type=image,name=${DEPLOY_IMAGE}:${CI_COMMIT_SHORT_SHA},push=true" \
+        --import-cache "type=registry,ref=${CACHE_REPO}" \
+        --export-cache "type=registry,ref=${CACHE_REPO},mode=max,ignore-error=true" 2>&1 | tee /tmp/build.log
+    - DEPLOY_DIGEST=$(grep -o "${DEPLOY_REGISTRY}[^ ]*@sha256:[a-f0-9]*" /tmp/build.log | tail -1 | grep -o "sha256:[a-f0-9]*")
+    - 'test -n "$DEPLOY_DIGEST" || { echo "FATAL: no deploy digest in build log"; exit 1; }'
+    - echo "IMAGE_DIGEST=${DEPLOY_DIGEST}"
+  rules:
+    - if: $BUILD_IMAGE == "1"
+    - if: $BUILD_IMAGE == "true"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        - images/omp-fork-builder/**/*
+        - .gitlab-ci.yml
+
+# =============================================================================
+# rebuild — the fork-auto-rebuild job, ported step by step from
+# .github/workflows/fork-auto-rebuild.yml (runs-on: ubuntu-22.04 → the
+# omp-fork-builder image built above).
+#
+# GH Actions → GitLab translation conventions used below:
+#   steps.<id>.outputs.* → plain shell variables (single job, one shell)
+#   GITHUB_ENV/GITHUB_OUTPUT persistence → exported vars / temp files
+#   ::error/::warning/::notice → [error]/[warning]/[notice] trace lines
+#   GITHUB_STEP_SUMMARY → echoed into the trace
+#   steps with continue-on-error → guarded subshells
+#   actions/cache → the job cache: block (bazel/cargo/bun, when:always so a
+#     later failure does not pay the cold price again on the retry)
+# =============================================================================
+rebuild:
+  stage: rebuild
+  image: "$OMP_BUILDER_IMAGE"
+  needs:
+    - job: build:omp-fork-builder
+      optional: true
+  # GH concurrency group "fork-auto-rebuild" with cancel-in-progress:false.
+  # The repair job shares this group. NOT interruptible: a cancelled-after-
+  # publish job is not green.
+  resource_group: fork-auto-rebuild
+  interruptible: false
+  timeout: 3h
+  variables:
+    # The rebase needs the full history of FIX_BRANCH and of upstream.
+    GIT_DEPTH: "0"
+    GIT_STRATEGY: fetch
+  cache:
+    # GH key: fork-bazel-<os>-<hashFiles(Cargo.lock, MODULE.bazel.lock,
+    # rust-toolchain.toml, .bazelversion, bazel/**, crates/**)> with
+    # restore-keys prefix fallback. GitLab hashes max 2 files per key, so the
+    # lockfiles stand in for the whole set and the prefix fallback carries
+    # the rest of the semantics.
+    - key:
+        files:
+          - Cargo.lock
+          - MODULE.bazel.lock
+        prefix: fork-bazel
+      paths:
+        - .cache/bazel-disk/
+        - .cache/bazel-repo/
+        - .cargo/
+      fallback_keys:
+        - fork-bazel-
+      policy: pull-push
+      when: always
+    # GH cached ~/.bun/install/cache via actions/cache (bun-install action).
+    - key:
+        files:
+          - bun.lock
+        prefix: fork-bun
+      paths:
+        - .cache/bun/
+      policy: pull-push
+      when: always
+  script:
+    # ---- shared setup ------------------------------------------------------
+    - |
+      set -euo pipefail
+      TMPD="$(mktemp -d)"
+      export TMPD
+      # Route every cache the GH job kept in $HOME into $CI_PROJECT_DIR so the
+      # GitLab runner cache (paths are project-relative) carries them.
+      export CARGO_HOME="${CI_PROJECT_DIR}/.cargo"
+      export BUN_INSTALL_CACHE_DIR="${CI_PROJECT_DIR}/.cache/bun"
+      export BAZEL_REPO_CACHE="${CI_PROJECT_DIR}/.cache/bazel-repo"
+      export BAZEL_DISK_CACHE="${CI_PROJECT_DIR}/.cache/bazel-disk"
+      force=false
+      case "${FORCE:-}" in
+        ""|0|f|false|FALSE|False|no|off) force=false ;;
+        *) force=true ;;
+      esac
+      echo "force=${force}"
+
+    # GitLab API helpers. The job token covers the canonical CI calls
+    # (package upload); FORK_GL_TOKEN (a project-scoped PAT, api+read/write
+    # repository) covers releases, links, tags and issues.
+    - |
+      cat >> /tmp/gl-helpers.sh <<'EOF'
+      api() { # api <METHOD> <path> [extra curl args...] -> HTTP_CODE + $TMPD/api-body
+        HTTP_CODE="$(curl -sS -o "${TMPD}/api-body" -w '%{http_code}' -X "$1" \
+          -H "PRIVATE-TOKEN: ${FORK_GL_TOKEN}" "${@:3}" \
+          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}$2")"
+      }
+      require_pat() {
+        [ -n "${FORK_GL_TOKEN:-}" ] || { echo "[error] $1 requires FORK_GL_TOKEN"; exit 1; }
+      }
+      upload_asset() { # <local file> <asset name>
+        curl -fsSL --retry 3 --retry-all-errors -X PUT \
+          -H "Job-Token: ${CI_JOB_TOKEN}" \
+          -H 'Content-Type: application/octet-stream' \
+          --data-binary "@$1" \
+          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/omp/${TARGET_VERSION}/$2"
+        echo "uploaded $2"
+      }
+      EOF
+      source /tmp/gl-helpers.sh
+
+    # ---- Token sanity (fail loud before 30 minutes of build) ----------------
+    - |
+      code="$(curl -sS -o /dev/null -w '%{http_code}' -H "Job-Token: ${CI_JOB_TOKEN}" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}")"
+      [ "$code" = 200 ] || { echo "[error] job token cannot read the project API (HTTP ${code})"; exit 1; }
+      if [ -n "${FORK_GL_TOKEN:-}" ]; then
+        code="$(curl -sS -o /dev/null -w '%{http_code}' -H "PRIVATE-TOKEN: ${FORK_GL_TOKEN}" "${CI_API_V4_URL}/user")"
+        [ "$code" = 200 ] || { echo "[error] FORK_GL_TOKEN rejected (HTTP ${code})"; exit 1; }
+      else
+        echo "[warning] FORK_GL_TOKEN not set: publishing, re-tagging and issue tracking will fail"
+      fi
+
+    # ---- Record pre-run state and fetch upstream (GH: "pre") ----------------
+    - |
+      git config user.name "fork-rebuild [bot]"
+      git config user.email "fork-rebuild@noreply.gitlab.k8s.bvox.net"
+      # The runner fetch may use a narrow refspec; FIX_BRANCH must resolve.
+      git fetch --prune origin "+refs/heads/*:refs/remotes/origin/*"
+      git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+      git fetch --tags --force upstream
+      BEFORE="$(git rev-parse "origin/${FIX_BRANCH}")"
+      echo "before=${BEFORE}"
+
+    # ---- Resolve target release (GH: "target") -------------------------------
+    - |
+      tag="${TARGET_TAG:-}"
+      if [ -z "$tag" ]; then
+        tag="$(curl -fsSL --retry 3 "https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest" | jq -r .tag_name)"
+      fi
+      if ! grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' <<< "$tag"; then
+        echo "[error] unexpected upstream tag '$tag'"; exit 1
+      fi
+      if ! git rev-parse -q --verify "refs/tags/${tag}^{commit}" > /dev/null; then
+        echo "[error] tag '$tag' is not present in this checkout"; exit 1
+      fi
+      TARGET_SHA="$(git rev-parse "refs/tags/${tag}^{commit}")"
+      # The release name and the version the binary reports must agree: a tag
+      # that does not contain the matching version bump (upstream has
+      # re-pointed tags before) would otherwise publish fork-X while the
+      # artifact prints omp/Y, and the sync would refuse to install it.
+      tree_version="$(git show "${tag}:packages/coding-agent/package.json" | jq -r '.version // empty' 2>/dev/null || true)"
+      if [ -z "$tree_version" ]; then
+        tree_version="${tag#v}"
+      elif [ "$tree_version" != "${tag#v}" ]; then
+        echo "[warning] Version mismatch: tag ${tag} carries package version ${tree_version}; naming the release after the tree"
+      fi
+      TARGET_VERSION="$tree_version"
+      base_sha="$(git merge-base "origin/${FIX_BRANCH}" "refs/tags/${tag}^{commit}")"
+      release_tag="${RELEASE_TAG_PREFIX}${TARGET_VERSION}"
+      release_lookup_url="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/releases/${release_tag}"
+      if [ -n "${FORK_GL_TOKEN:-}" ]; then
+        release_code="$(curl -sS -o /dev/null -w '%{http_code}' -H "PRIVATE-TOKEN: ${FORK_GL_TOKEN}" "$release_lookup_url")"
+      else
+        # Anonymous on a private project reads as 404 = "no release yet";
+        # accurate lookups require the PAT (checked above).
+        release_code="$(curl -sS -o /dev/null -w '%{http_code}' "$release_lookup_url")"
+      fi
+      case "$release_code" in
+        200) release_exists=true ;;
+        404) release_exists=false ;;
+        *)   echo "[error] release lookup for ${release_tag} returned HTTP ${release_code}"; exit 1 ;;
+      esac
+      # "Current" means nothing left to do: the artifact for this exact
+      # upstream tag exists. The stack base is diagnostic only — when a push
+      # is rejected the branch stays parked on an older tag's base forever,
+      # and gating on it would rebuild the same artifact on every timer cycle.
+      echo "stack base ${base_sha} vs target ${tag} (${TARGET_SHA}); release ${release_tag} exists=${release_exists}"
+      CURRENT="$release_exists"
+      echo "TARGET_TAG=${tag}" >> "${CI_PROJECT_DIR}/.fork-rebuild-state"
+      echo "RELEASE_TAG=${release_tag}" >> "${CI_PROJECT_DIR}/.fork-rebuild-state"
+
+    # ---- Skip when already current (GH: gated step → early green exit) -------
+    - |
+      if [ "$CURRENT" = true ] && [ "$force" != true ]; then
+        echo "Nothing to do: ${FIX_BRANCH} is already based on ${tag}."
+        echo "Pass FORCE=1 to rebuild this tag anyway."
+        exit 0
+      fi
+
+    # ---- Rebase fix stack onto target release (GH: "Rebase fix stack") -------
+    - |
+      git checkout -B "$FIX_BRANCH" "origin/${FIX_BRANCH}"
+      # The stack's fork point, never its tip's parent: with more than one
+      # patch, ~1 is the second patch and --onto would drop every commit
+      # below it.
+      base="$(git merge-base "$FIX_BRANCH" "${TARGET_SHA}")"
+      if [ "$base" = "${TARGET_SHA}" ]; then
+        echo "Already rebased onto ${tag}; rebuild only."
+      else
+        before_count="$(git rev-list --count "${FIX_BRANCH}" "^${base}")"
+        # --empty=drop: a commit whose diff upstream already contains is
+        # dropped, which is the exact signal the retirement probe reports.
+        git rebase --empty=drop --onto "${TARGET_SHA}" "$base"
+        after_count="$(git rev-list --count HEAD "^${TARGET_SHA}")"
+        echo "stack commits before=${before_count} after=${after_count}"
+        if [ "${after_count}" -lt "${before_count}" ]; then
+          echo "[notice] Patch dropped: a stack commit was dropped as already present upstream"
+        fi
+      fi
+      echo "rebased head: $(git rev-parse HEAD)"
+      git log --oneline "${tag}..HEAD"
+
+    # ---- Install bun and dependencies (GH: bun-install action) ---------------
+    # bun itself is baked into the builder image at the repo pin; the shared
+    # store retry (corrupt/partial tarball) is ported from the action.
+    - |
+      if ! bun install --frozen-lockfile; then
+        echo "[warning] bun install retry: store install failed; retrying with a clean job-local cache"
+        retry_cache="$(mktemp -d)"
+        bun install --frozen-lockfile --cache-dir="$retry_cache"
+      fi
+
+    # ---- Compose bazel rc (GH: bazel-cache action, no-credential branch) -----
+    # No bazel-remote credentials exist on this runner, so the fragment is
+    # --config=ci only (the action's documented uncached fallback) and the
+    # GitLab runner cache carries the disk/repo caches instead.
+    - |
+      bazelrc="${TMPD}/bazel-cache.rc"
+      echo "common --config=ci" > "$bazelrc"
+
+    # ---- Seed the macOS SDK package in the bazel repository cache (GH step) --
+    # swcdn.apple.com answers 403 to some cloud runner IPs; the archive is
+    # seeded into bazel's repository cache (sha256-pinned, retries safe) and
+    # the runner cache carries it afterwards. continue-on-error in GH.
+    - |
+      if [ "$CURRENT" != true ]; then
+        if ( set -uo pipefail
+             url="https://swcdn.apple.com/content/downloads/58/48/082-83364-A_KCEBOO2NJS/0d2rj4y5ucjlkgcvqt6f6a4pergug5tu2b/CLTools_macOSNMOS_SDK.pkg"
+             sha="d55351824fd17742fd6e1e7a252fa1028698f32147ee48be9a6b75442bf30575"
+             dest="${BAZEL_REPO_CACHE}/content_addressable/sha256/$sha/file"
+             if [ -f "$dest" ] && [ "$(sha256sum "$dest" | cut -d' ' -f1)" = "$sha" ]; then
+                echo "macOS SDK package already in the bazel repository cache"
+                exit 0
+             fi
+             mkdir -p "$(dirname "$dest")"
+             tmp="$dest.part.$$"
+             for attempt in 1 2 3 4 5 6; do
+                if curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 \
+                      --connect-timeout 20 --max-time 900 -A "Mozilla/5.0" -o "$tmp" "$url"; then
+                   if [ "$(sha256sum "$tmp" | cut -d' ' -f1)" = "$sha" ]; then
+                      mv -f "$tmp" "$dest"
+                      echo "cached the macOS SDK package"
+                      exit 0
+                   fi
+                   echo "attempt ${attempt}: checksum mismatch"
+                else
+                   echo "attempt ${attempt}: download failed"
+                fi
+                sleep $((attempt * 5))
+             done
+             rm -f "$tmp"
+             echo "[warning] macOS SDK package not cached; bazel will try the CDN itself"
+           ); then :; else echo "[warning] macOS SDK seed step failed"; fi
+      fi
+
+    # ---- Build linux-x64 native addons (test harness) (GH step) --------------
+    - |
+      if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
+      # One addon per invocation: several at once OOMs the link steps
+      # (upstream hits this on their pods too, see ci.yml).
+      for target in natives-linux-x64-baseline natives-linux-x64-modern; do
+         bazelisk --bazelrc="${bazelrc}" \
+            build --repository_cache="${BAZEL_REPO_CACHE}" --disk_cache="${BAZEL_DISK_CACHE}" \
+            "//:${target}"
+      done
+      mkdir -p packages/natives/native
+      for target in natives-linux-x64-baseline natives-linux-x64-modern; do
+         cp -L bazel-bin/"${target}"/*.node packages/natives/native/
+      done
+      ls -l packages/natives/native/
+      # Bazel emits the addon post-link, before the release stamp exists;
+      # the standalone-binary embedder rejects an unstamped addon.
+      for addon in packages/natives/native/*.node; do
+         bun scripts/stamp-native-version.ts "$addon"
+      done
+
+    # ---- Retirement probes: stock tag vs each fork patch (GH step) -----------
+    # continue-on-error in GH; the retired flag crosses as a file.
+    - |
+      retire_out="${TMPD}/retire.out"
+      if ( set -uo pipefail
+           todo_retired=false
+           composer_retired=false
+           # Composer patch: upstream registering the same setting id is the
+           # equivalence signal; no behavioural test is needed for it.
+           if git grep -qF 'composer.terminalForeground' "${tag}" -- packages/coding-agent/src/modes/settings.ts; then
+              composer_retired=true
+           fi
+           # Todo patch: the fork's regression suite must pass on the stock
+           # tree. Untracked build outputs survive the detached checkout.
+           git checkout --detach "${TARGET_SHA}"
+           git checkout "${FIX_BRANCH}" -- packages/coding-agent/test/tools/todo.test.ts
+           set +e
+           ( cd packages/coding-agent && bun test test/tools/todo.test.ts ) 2>&1 | tail -60
+           rc="${PIPESTATUS[0]}"
+           set -e
+           git checkout -f "${FIX_BRANCH}"
+           if [ "$rc" -eq 0 ]; then todo_retired=true; fi
+           echo "todo patch redundant on stock ${tag}: ${todo_retired}"
+           echo "composer patch redundant on stock ${tag}: ${composer_retired}"
+           if [ "$todo_retired" = true ] && [ "$composer_retired" = true ]; then
+              echo "true" > "${retire_out}"
+           else
+              echo "false" > "${retire_out}"
+           fi
+         ); then :; else echo "[warning] retirement probes errored"; fi
+      RETIRED="$(cat "${retire_out}" 2>/dev/null || echo false)"
+      echo "retired=${RETIRED}"
+
+    # ---- Stage darwin-arm64 native addon (GH step) ---------------------------
+    # Prefer the version-pinned npm leaf: the local patches touch no Rust, so
+    # the addon published for this exact upstream version is the same bytes
+    # the SDK cross build produces, and it removes Apple's CDN from the
+    # critical path. Bazel stays as the fallback.
+    - |
+      mkdir -p packages/natives/native
+      addon="packages/natives/native/pi_natives.darwin-arm64.node"
+      leaf="@oh-my-pi/pi-natives-darwin-arm64@${TARGET_VERSION}"
+      tarball="$(npm view "$leaf" dist.tarball 2>/dev/null || true)"
+      if [ -n "$tarball" ]; then
+         curl -fsSL --retry 5 --retry-all-errors -o "${TMPD}/leaf.tgz" "$tarball"
+         tar -xzf "${TMPD}/leaf.tgz" -C "${TMPD}"
+         cp "${TMPD}/package/pi_natives.darwin-arm64.node" "$addon"
+         echo "darwin addon staged from $leaf"
+      else
+         echo "[warning] npm leaf missing: no $leaf published; building the darwin addon with bazel"
+         if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
+         built=false
+         for attempt in 1 2 3; do
+            if bazelisk --bazelrc="${bazelrc}" \
+                  build --repository_cache="${BAZEL_REPO_CACHE}" --disk_cache="${BAZEL_DISK_CACHE}" \
+                  //:natives-darwin-arm64; then
+               built=true
+               break
+            fi
+            echo "bazel darwin build attempt ${attempt} failed"
+            sleep 20
+         done
+         [ "$built" = true ] || { echo "[error] darwin addon build failed after retries"; exit 1; }
+         cp -L bazel-bin/natives-darwin-arm64/*.node "$addon"
+      fi
+      if ! bun scripts/stamp-native-version.ts "$addon"; then
+         echo "[warning] addon left as published; the embedder accepts a pre-stamp addon"
+      fi
+      file "$addon"
+
+    # ---- Build release binary (GH step) --------------------------------------
+    - |
+      export RELEASE_TARGETS=darwin-arm64
+      bun run ci:release:build-binaries
+      binary="packages/coding-agent/binaries/omp-darwin-arm64"
+      file "$binary"
+      # The artifact must contain the fork patch, not just the tag. These
+      # strings are added by the fix commit (prompt text + ambiguity error)
+      # and are absent from a stock build. When the rebase dropped the commit
+      # as redundant, the stack is empty and upstream's own wording applies,
+      # so the assertions are skipped rather than blocking the publish.
+      stack_subjects="$(git log --format=%s "${tag}..HEAD")"
+      echo "marker counts: ambiguity=$(grep -ac 'matches multiple items' "$binary" || true) keyrule=$(grep -ac 'must be the task text as a plain string' "$binary" || true) composer=$(grep -ac 'composer.terminalForeground' "$binary" || true)"
+      if grep -q 'wrapped todo item shapes' <<< "$stack_subjects"; then
+         # Prompt markdown is not stored verbatim in the bundle, so the
+         # markers are the patch's own TS string literals.
+         grep -aqF 'matches multiple items' "$binary" \
+            || { echo "[error] todo patch ambiguity guard missing from the built binary"; exit 1; }
+         grep -aqF 'must be the task text as a plain string' "$binary" \
+            || { echo "[error] todo patch item-key validation missing from the built binary"; exit 1; }
+         echo "todo patch markers present in the artifact"
+      else
+         echo "todo patch is not in the stack; its markers skipped"
+      fi
+      if grep -q 'terminalForeground' <<< "$stack_subjects"; then
+         grep -aqF 'composer.terminalForeground' "$binary" \
+            || { echo "[error] composer patch setting missing from the built binary"; exit 1; }
+         echo "composer patch marker present in the artifact"
+      else
+         echo "composer patch is not in the stack; its marker skipped"
+      fi
+      bash scripts/ci-macos-sign.sh "$binary"
+      ( cd packages/coding-agent/binaries && sha256sum omp-darwin-arm64 > SHA256SUMS.txt && cat SHA256SUMS.txt )
+
+    # ---- Pin the battery's Chromium to the managed Chrome for Testing (GH) --
+    # The browser bucket must not use whatever Chromium the image carries: the
+    # env override makes the battery a function of the lockfile instead of the
+    # calendar (2026-11-15: runner Chrome 157 dropped WebMCPTesting support).
+    - |
+      if command -v google-chrome > /dev/null; then google-chrome --version || true; fi
+      resolved="$(cd packages/coding-agent && bun -e '
+         const fs = await import("node:fs");
+         const { getPuppeteerDir } = await import("@oh-my-pi/pi-utils");
+         const browsers = await import("@oh-my-pi/pi-utils/browsers");
+         const { PUPPETEER_REVISIONS } = await import("puppeteer-core/internal/revisions.js");
+         const platform = browsers.detectBrowserPlatform();
+         const cacheDir = getPuppeteerDir();
+         const buildId = PUPPETEER_REVISIONS.chrome;
+         const executablePath = browsers.computeExecutablePath({ buildId, cacheDir, platform });
+         if (!fs.existsSync(executablePath)) await browsers.install({ buildId, cacheDir, platform });
+         console.log(executablePath);
+      ')"
+      file_type="$(file "$resolved" 2>/dev/null || true)"
+      echo "managed chromium: $resolved"
+      echo "$file_type"
+      export PUPPETEER_EXECUTABLE_PATH="$resolved"
+      "$resolved" --version
+
+    # ---- Test battery and lint (GH step) --------------------------------------
+    # The battery launches a real Chromium for its browser suites, and those
+    # suites run only where chromiumAvailable()'s 5s CDP probe passes. One
+    # retry absorbs a transient browser or CPU hiccup without hiding a
+    # regression: anything real fails both attempts.
+    - |
+      bun run check:tools
+      attempt=1
+      while :; do
+         if bun scripts/ci-test-ts.ts local-ts; then
+            break
+         fi
+         if [ "$attempt" -ge 2 ]; then
+            echo "[error] Test battery failed twice: the battery is red on attempt ${attempt}; treating it as a regression"
+            exit 1
+         fi
+         attempt=$((attempt + 1))
+         echo "[warning] Test battery retry: the battery failed; retrying once (attempt ${attempt}/2)"
+      done
+
+    # ---- Push rebased branch (GH step; credentials hierarchy replaced) -------
+    # GitHub needed FORK_PUSH_KEY/GITHUB_TOKEN/deploy-key fallbacks because of
+    # the workflow-file push restriction; on GitLab the CI internal remote
+    # (job token) is the only credential. The internal webservice URL is tried
+    # first (same endpoint the runner clones from, no Traefik hop), then the
+    # external CI_REPOSITORY_URL. The lease still protects against a human
+    # rebase/push that raced this run. Never echo the push URLs (they embed
+    # the job token).
+    - |
+      set +e
+      lease="refs/heads/${FIX_BRANCH}:${BEFORE}"
+      refspec="refs/heads/${FIX_BRANCH}:refs/heads/${FIX_BRANCH}"
+      internal="http://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab-webservice-default.gitlab.svc.cluster.local:8181/${CI_PROJECT_PATH}.git"
+      pushed=false
+      tagged=false
+      if git push --force-with-lease="$lease" "$internal" "$refspec"; then
+         pushed=true
+         echo "pushed via the internal webservice URL (job token)"
+      else
+         echo "[warning] internal job-token push refused; retrying via CI_REPOSITORY_URL"
+         if git push --force-with-lease="$lease" "$CI_REPOSITORY_URL" "$refspec"; then
+            pushed=true
+            echo "pushed with the job token"
+         fi
+      fi
+      # Last resort: a provenance tag, for a repository that only protects
+      # branches.
+      if [ "$pushed" != true ]; then
+         stack_tag="stack-${TARGET_VERSION}"
+         if git push --force "$internal" "HEAD:refs/tags/${stack_tag}" \
+            || git push --force "$CI_REPOSITORY_URL" "HEAD:refs/tags/${stack_tag}"; then
+            tagged=true
+            echo "pushed the stack tag ${stack_tag} at $(git rev-parse HEAD)"
+         fi
+      fi
+      set -e
+      echo "pushed=${pushed} tagged=${tagged}"
+
+    # ---- Publish fork release (GH step; gh CLI → GitLab API) -----------------
+    # Assets: GitLab generic package registry (job token, idempotent PUT
+    # overwrite) + a GitLab release fork-<version> with asset links (PAT).
+    - |
+      require_pat "publishing the fork release"
+      release_tag="${RELEASE_TAG_PREFIX}${TARGET_VERSION}"
+      head_sha="$(git rev-parse HEAD)"
+      # Title honesty: the stack grows and shrinks, so count it instead of
+      # hardcoding a number that goes stale.
+      stack_commits="$(git rev-list --count "${tag}..HEAD")"
+      notes="${TMPD}/notes.md"
+      branch_state="${pushed}"
+      tag_state="${tagged}"
+      if [ "$branch_state" = true ] || [ "$tag_state" = true ]; then
+         target="$head_sha"
+         intended_sha="$head_sha"
+         stack_state="stack committed at ${head_sha} (branch=${branch_state} tag=${tag_state})"
+      else
+         intended_sha=""
+         stack_state=""
+      fi
+      # A release cannot be targeted at a commit this repository does not
+      # carry: anchor the tag on the most specific commit the fork actually
+      # has, and say which one in the notes.
+      fork_has_commit() {
+         api GET "/repository/commits/$1"
+         [ "$HTTP_CODE" = 200 ]
+      }
+      if [ -z "$intended_sha" ] || ! fork_has_commit "$intended_sha"; then
+         if [ -z "$intended_sha" ]; then
+            anchor_why="the stack could not be pushed, so the artifact has no commit of its own here"
+         else
+            anchor_why="stack head ${head_sha} is not in this repository"
+         fi
+         intended_sha=""
+         for candidate in "${BEFORE}" \
+                           "$(git rev-parse refs/remotes/origin/main 2>/dev/null || true)" \
+                           "$(git rev-parse "refs/tags/${tag}^{commit}" 2>/dev/null || true)"; do
+            [ -n "$candidate" ] || continue
+            if fork_has_commit "$candidate"; then
+               intended_sha="$candidate"
+               break
+            fi
+         done
+         if [ -z "$intended_sha" ]; then
+            echo "[error] no commit of this repository is available to target ${release_tag}"
+            exit 1
+         fi
+         target="$intended_sha"
+         stack_state="built on upstream ${tag} with the stack patch attached (${anchor_why}); release anchored at ${intended_sha}"
+      fi
+      if [ "$RETIRED" = true ]; then
+         probe="stock upstream PASSES the regression battery - the patch is redundant and stock 'omp update' is safe"
+      else
+         probe="stock upstream still fails the regression battery - the patch is still required"
+      fi
+      {
+        echo "Upstream release: https://github.com/${UPSTREAM_REPO}/releases/tag/${tag}"
+        echo
+        echo "Fork commit: ${head_sha} (${FIX_BRANCH})"
+        echo "Stack: ${stack_state}"
+        echo "Battery: local-ts + check:tools green on this tree."
+        echo "Retirement probe: ${probe}"
+        echo
+        echo '```'
+        git log --oneline "${tag}..HEAD"
+        echo '```'
+      } > "$notes"
+      binaries_dir="packages/coding-agent/binaries"
+      git diff "${tag}" HEAD > STACK.patch
+      # A release cannot be re-targeted later, so when the branch now carries
+      # the artifact's commit but the existing release points elsewhere,
+      # delete and recreate rather than upload onto a wrong tag.
+      existing_tag_sha=""
+      api GET "/repository/tags/${release_tag}"
+      if [ "$HTTP_CODE" = 200 ]; then
+         existing_tag_sha="$(jq -r '.commit.id // empty' "${TMPD}/api-body")"
+      fi
+      api GET "/releases/${release_tag}"
+      if [ "$HTTP_CODE" = 200 ] && [ -n "$existing_tag_sha" ] && [ "$existing_tag_sha" != "$intended_sha" ]; then
+         echo "[notice] Re-tagging: existing release points at ${existing_tag_sha}, this artifact at ${head_sha}; recreating the tag"
+         api DELETE "/releases/${release_tag}"
+         [ "$HTTP_CODE" = 204 ] || { echo "[error] release delete returned HTTP ${HTTP_CODE}"; exit 1; }
+         api DELETE "/repository/tags/${release_tag}"
+         [ "$HTTP_CODE" = 204 ] || { echo "[error] tag delete returned HTTP ${HTTP_CODE}"; exit 1; }
+      fi
+      asset_url() { echo "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/omp/${TARGET_VERSION}/$1"; }
+      link_asset() { # <name>
+         api GET "/releases/${release_tag}/assets/links"
+         if [ "$HTTP_CODE" = 200 ] && jq -e --arg n "$1" 'any(.name == $n)' "${TMPD}/api-body" > /dev/null; then
+            echo "link $1 already present"
+         else
+            api POST "/releases/${release_tag}/assets/links" \
+              --data-urlencode "name=$1" --data-urlencode "url=$(asset_url "$1")"
+            [ "$HTTP_CODE" = 201 ] || { echo "[error] link create for $1 returned HTTP ${HTTP_CODE}"; cat "${TMPD}/api-body"; exit 1; }
+         fi
+      }
+      api GET "/releases/${release_tag}"
+      if [ "$HTTP_CODE" = 200 ]; then
+         upload_asset "${binaries_dir}/omp-darwin-arm64" omp-darwin-arm64
+         upload_asset "${binaries_dir}/SHA256SUMS.txt" SHA256SUMS.txt
+         upload_asset STACK.patch STACK.patch
+         link_asset omp-darwin-arm64
+         link_asset SHA256SUMS.txt
+         link_asset STACK.patch
+         api PUT "/releases/${release_tag}" --data-urlencode "description@${notes}"
+         [ "$HTTP_CODE" = 200 ] || { echo "[error] release notes update returned HTTP ${HTTP_CODE}"; cat "${TMPD}/api-body"; exit 1; }
+      else
+         upload_asset "${binaries_dir}/omp-darwin-arm64" omp-darwin-arm64
+         upload_asset "${binaries_dir}/SHA256SUMS.txt" SHA256SUMS.txt
+         upload_asset STACK.patch STACK.patch
+         api POST "/releases" \
+           --data-urlencode "tag_name=${release_tag}" \
+           --data-urlencode "ref=${target}" \
+           --data-urlencode "name=omp ${TARGET_VERSION} + ${stack_commits} local commits" \
+           --data-urlencode "description@${notes}"
+         [ "$HTTP_CODE" = 201 ] || { echo "[error] release create returned HTTP ${HTTP_CODE}"; cat "${TMPD}/api-body"; exit 1; }
+         link_asset omp-darwin-arm64
+         link_asset SHA256SUMS.txt
+         link_asset STACK.patch
+      fi
+      echo "Published: ${CI_PROJECT_URL}/-/releases/${release_tag}"
+
+    # ---- Flag a redundant patch (GH step) -------------------------------------
+    - |
+      if [ "$RETIRED" = true ]; then
+         require_pat "the retirement issue"
+         title="Retire fork: upstream ${tag} covers every local patch"
+         body_file="${TMPD}/retire-body.md"
+         printf 'Every probe-able fork patch is now redundant on the stock upstream tree (%s): the todo-shape regression battery passes there and the composer.terminalForeground setting is registered upstream, so %s adds nothing. Check the test-only commit (the background-tab screenshot visibility assertion) before deleting the workflow: it has no probe.\n\nNext step: run `omp update` to return to stock binaries, delete the omp-fork-sync LaunchAgent and script from the dotfiles, and delete this pipeline.\n' \
+            'todo.test.ts' "${FIX_BRANCH}" > "$body_file"
+         api GET "/issues?state=opened&per_page=100"
+         existing="$(jq -r --arg t "$title" 'map(select(.title | startswith("Retire fork:"))) | .[0].iid // empty' "${TMPD}/api-body")"
+         if [ -n "$existing" ]; then
+            api POST "/issues/${existing}/notes" --data-urlencode "body@${body_file}"
+         else
+            api POST "/issues" --data-urlencode "title=${title}" --data-urlencode "description@${body_file}"
+            [ "$HTTP_CODE" = 201 ] || { echo "[error] retire issue create returned HTTP ${HTTP_CODE}"; exit 1; }
+         fi
+      fi
+
+  # ---- Report failure / Close the failure tracker (GH steps) -----------------
+  # Both GH steps become one after_script keyed on CI_JOB_STATUS; shell state
+  # from script: is gone, so the target tag crosses via .fork-rebuild-state.
+  after_script:
+    - |
+      set -uo pipefail
+      cd "${CI_PROJECT_DIR}"
+      [ -n "${FORK_GL_TOKEN:-}" ] || { echo "[warning] FORK_GL_TOKEN unset; failure tracking skipped"; exit 0; }
+      tag="unknown"
+      [ -f .fork-rebuild-state ] && while IFS='=' read -r k v; do
+        case "$k" in TARGET_TAG|RELEASE_TAG) eval "$k=\$v" ;; esac
+      done < .fork-rebuild-state
+      gh_username="$(curl -sS -H "PRIVATE-TOKEN: ${FORK_GL_TOKEN}" "${CI_API_V4_URL}/user" | jq -r .username)"
+      api() { # api <METHOD> <path> [extra curl args...]
+        HTTP_CODE="$(curl -sS -o /tmp/after-body -w '%{http_code}' -X "$1" \
+          -H "PRIVATE-TOKEN: ${FORK_GL_TOKEN}" "${@:3}" \
+          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}$2")"
+      }
+      if [ "${CI_JOB_STATUS:-success}" = failed ]; then
+         title="fork-auto-rebuild failing for ${tag}"
+         body_file=/tmp/failure-body.md
+         {
+           echo "Job: ${CI_JOB_URL}"
+           echo
+           echo "The installed binary was NOT touched: a failed run changes the publication surface only, and the laptop sync installs nothing without a matching release asset."
+         } > "$body_file"
+         # One tracking issue, one tracking comment: every later failure EDITS
+         # that comment and retitles the issue; duplicates left by earlier runs
+         # are deleted so the issue converges to one.
+         api GET "/issues?state=opened&per_page=100"
+         existing="$(jq -r 'map(select(.title | test("^fork-auto-rebuild fail(ed|ing) "))) | .[0].iid // empty' /tmp/after-body)"
+         if [ -z "${existing:-}" ]; then
+            api POST "/issues" --data-urlencode "title=${title}" --data-urlencode "description@${body_file}"
+            exit 0
+         fi
+         api GET "/issues/${existing}/notes?per_page=100"
+         comment_ids="$(jq -r --arg u "$gh_username" 'map(select(.author.username == $u) | .id) | .[]' /tmp/after-body)"
+         first_comment="$(head -n1 <<< "${comment_ids:-}")"
+         if [ -n "${first_comment:-}" ]; then
+            api PUT "/issues/${existing}/notes/${first_comment}" --data-urlencode "body@${body_file}"
+            tail -n +2 <<< "${comment_ids}" | while read -r duplicate; do
+              [ -n "${duplicate:-}" ] && api DELETE "/issues/${existing}/notes/${duplicate}"
+            done
+         else
+            api POST "/issues/${existing}/notes" --data-urlencode "body@${body_file}"
+         fi
+         api PUT "/issues/${existing}" --data-urlencode "title=${title}"
+      else
+         # The counterpart: a tracker that stays open after the build recovers
+         # is the same noise as a duplicate comment. Only fires on a green run.
+         api GET "/issues?state=opened&per_page=100"
+         existing="$(jq -r 'map(select(.title | test("^fork-auto-rebuild fail(ed|ing) "))) | .[0].iid // empty' /tmp/after-body)"
+         [ -n "${existing:-}" ] || exit 0
+         api PUT "/issues/${existing}" \
+           --data-urlencode "title=fork-auto-rebuild recovered for ${tag}" \
+           --data-urlencode "state_event=close"
+         api POST "/issues/${existing}/notes" \
+           --data-urlencode "body=Recovered: ${CI_JOB_URL} completed green for ${tag}."
+      fi
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_PIPELINE_SOURCE == "api"
+    - if: $CI_PIPELINE_SOURCE == "trigger"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
