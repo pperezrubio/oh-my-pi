@@ -349,9 +349,17 @@ rebuild:
     # No bazel-remote credentials exist on this runner, so the fragment is
     # --config=ci only (the action's documented uncached fallback) and the
     # GitLab runner cache carries the disk/repo caches instead.
+    # --repo_contents_cache= (empty, i.e. disabled): bazel 9 hard-errors when
+    # the repo contents cache lives inside the main repo, and the caches are
+    # parked in $CI_PROJECT_DIR here so the GitLab runner cache can carry
+    # them (GH had them under $HOME, outside the workspace). The repository
+    # cache (content_addressable) and the disk cache keep working.
     - |
       bazelrc="${TMPD}/bazel-cache.rc"
-      echo "common --config=ci" > "$bazelrc"
+      {
+        echo "common --config=ci"
+        echo "common --repo_contents_cache="
+      } > "$bazelrc"
 
     # ---- Seed the macOS SDK package in the bazel repository cache (GH step) --
     # swcdn.apple.com answers 403 to some cloud runner IPs; the archive is
