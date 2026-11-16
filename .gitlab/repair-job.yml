@@ -1,0 +1,78 @@
+# =============================================================================
+# .gitlab/repair-job.yml — automated repair harness for the fork rebuild job
+# =============================================================================
+# Included from the root .gitlab-ci.yml:
+#
+#     include:
+#       - local: .gitlab/repair-job.yml
+#
+# The root file owns stages/workflow/variables. This file contributes exactly
+# one job, parked in GitLab's built-in `.post` stage, so including it never
+# requires a `stages:` edit. Coupling contract with the root file (agreed with
+# the CI port slice):
+#   - the rebuild job is named `rebuild`
+#   - the builder image ref is exposed as the pipeline-level variable
+#     OMP_BUILDER_IMAGE (full literal, no nested expansion)
+#   - rebuild carries the same resource_group, so a repair never races a
+#     rebuild inside this project
+#
+# What the job does (driver: .gitlab/repair/run.sh, agent doctrine:
+# .gitlab/repair/doctrine.md):
+#   1. resolves the same upstream target the failed rebuild resolved, and
+#      bounds repairs per fork release tag (state in the generic package
+#      registry — the release tag is the idempotency key, the same rule the
+#      rebuild's skip-when-current honours)
+#   2. replays the rebuild's exact rebase (`git rebase --empty=drop --onto
+#      <target> <merge-base>`), leaving a conflicted rebase mid-flight
+#   3. runs headless omp (print mode, yolo approvals) INSIDE this pod with the
+#      repair worktree as cwd and the doctrine appended to its system prompt
+#   4. verifies the result, pushes fix/local-patch-stack with a lease through
+#      the CI internal remote, and re-triggers the pipeline on the default
+#      branch — the loop closes through the pipeline itself and is bounded by
+#      the attempt counter in step 1
+#
+# The agent never sees a push credential: the harness pushes, the agent
+# repairs. A repair that cannot finish exits non-zero and burns no attempt.
+
+repair:
+  stage: .post
+  image: $OMP_BUILDER_IMAGE
+  tags: [kubernetes]
+  needs:
+    - job: rebuild
+      artifacts: false
+  when: on_failure
+  # publishes (branch push + pipeline re-trigger); a cancel mid-flight would
+  # leave the attempt state ahead of reality — never interrupt this job
+  interruptible: false
+  # the agent itself is bounded by --max-time/--max-cost inside; this is the
+  # outer ceiling including checkout, bun install and the natives leaf
+  timeout: 1h
+  # same group as the rebuild job: repairs serialize against rebuilds so a
+  # re-triggered pipeline never overlaps the repair that produced it
+  resource_group: fork-auto-rebuild
+  # one agent run per job invocation: a runner-level retry would silently
+  # spend a second agent budget on the same failure; the nightly schedule is
+  # the retry path for infra blips
+  retry: 0
+  variables:
+    # the rebase needs full history plus the upstream tags; GIT_DEPTH would
+    # make merge-base lie about the fork point
+    GIT_DEPTH: "0"
+    GIT_STRATEGY: fetch
+    # agent lane — overridable per pipeline or per schedule
+    REPAIR_MODEL: "litellm/z-ai/glm-5.3"
+    REPAIR_MAX_ATTEMPTS: "3"
+    REPAIR_AGENT_MAX_TIME: "35m"
+    REPAIR_AGENT_MAX_COST: "8"
+    LITELLM_BASE_URL: "https://llm-proxy.k8s.bvox.net/v1"
+  script:
+    - bash .gitlab/repair/run.sh
+  rules:
+    # nightly schedule / api / web pipelines on the default branch are the
+    # repair surface; the REPAIR_TEST lane allows branch pipelines to exercise
+    # the harness without pushing or re-triggering anything
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: on_failure
+    - if: '$REPAIR_TEST == "1"'
+      when: on_failure
