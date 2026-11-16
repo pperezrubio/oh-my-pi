@@ -125,6 +125,15 @@ else
    warn "could not fetch the failed rebuild trace; proceeding without it"
 fi
 
+# Infra/toolchain failures (missing image packages, registry or node outages)
+# are not patch-stack defects and the agent has no doctrine for them: report
+# by standing down without burning an agent attempt on unfixable ground.
+# The pipeline is already red and visible; the attempt ledger is not consumed.
+if [ "$MODE" = "unknown" ]; then
+   say "no recognized patch-stack failure mode; standing down without an agent attempt"
+   exit 0
+fi
+
 # ---------------------------------------------------------------------------
 # 4. repair worktree + replay of the rebuild's exact rebase
 # ---------------------------------------------------------------------------
@@ -157,7 +166,10 @@ bun install --frozen-lockfile >/tmp/bun-install.log 2>&1 \
 say "staging the linux-x64 natives addon from the version-pinned npm leaf"
 OMP_VERSION="$(jq -r '.version' packages/natives/package.json)"
 leaf="@oh-my-pi/pi-natives-linux-x64@${OMP_VERSION}"
-tarball="$(curl -fsSL --retry 3 "https://registry.npmjs.org/${leaf//\//%2F}" | jq -r --arg v "$OMP_VERSION" '.versions[$v].dist.tarball // empty')"
+# `npm view` on the exact leaf, mirroring the GH workflow's darwin staging:
+# the raw registry document URL must carry the bare package name only — a
+# version-suffixed name 404s (found live on pipeline 2899's repair run).
+tarball="$(npm view "$leaf" dist.tarball 2>/dev/null || true)"
 [ -n "$tarball" ] || die "no npm leaf ${leaf} published and no natives staged"
 curl -fsSL --retry 5 -o /tmp/leaf.tgz "$tarball"
 rm -rf /tmp/leaf && mkdir -p /tmp/leaf

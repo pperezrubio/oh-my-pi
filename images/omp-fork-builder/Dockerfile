@@ -36,7 +36,7 @@ RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.
     && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
          ca-certificates curl git jq file unzip zip xz-utils python3 nodejs npm \
-         build-essential \
+         build-essential cmake \
          libasound2 libatk-bridge2.0-0 libatk1.0-0 libcairo2 libcups2 \
          libdbus-1-3 libexpat1 libfontconfig1 libgbm1 libglib2.0-0 \
          libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 libpangocairo-1.0-0 \
