@@ -171,10 +171,14 @@ rebuild:
           - Cargo.lock
           - MODULE.bazel.lock
         prefix: fork-bazel
+      # Only the registry/git trees: bazel's cargo splice rewrites
+      # .cargo/config.toml (a TRACKED file), and caching it would dirty the
+      # freshly restored checkout on the next run.
       paths:
         - .cache/bazel-disk/
         - .cache/bazel-repo/
-        - .cargo/
+        - .cargo/registry/
+        - .cargo/git/
       fallback_keys:
         - fork-bazel-
       policy: pull-push
@@ -314,7 +318,7 @@ rebuild:
 
     # ---- Rebase fix stack onto target release (GH: "Rebase fix stack") -------
     - |
-      git checkout -B "$FIX_BRANCH" "origin/${FIX_BRANCH}"
+      git checkout -f -B "$FIX_BRANCH" "origin/${FIX_BRANCH}"
       # The stack's fork point, never its tip's parent: with more than one
       # patch, ~1 is the second patch and --onto would drop every commit
       # below it.
