@@ -19,12 +19,10 @@
 # The repair job lives in .gitlab/repair-job.yml (owned by the repair slice):
 # it is `stage: .post`, `needs: [rebuild]`, `when: on_failure`, sharing the
 # fork-auto-rebuild resource group, and references this pipeline's
-# OMP_BUILDER_IMAGE. It is deliberately NOT included here yet: include:local
-# has no missing-file guard and the file is absent on ci/gitlab-port, so the
-# include is added when both branches merge to main:
-#
-#   include:
-#     - local: .gitlab/repair-job.yml
+# OMP_BUILDER_IMAGE. Both branches are merged now — the include is live.
+
+include:
+  - local: .gitlab/repair-job.yml
 
 workflow:
   auto_cancel:
