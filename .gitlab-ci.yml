@@ -735,7 +735,7 @@ rebuild:
   after_script:
     - |
       set -uo pipefail
-      cd "${CI_PROJECT_DIR}"
+      cd "${CI_PROJECT_DIR}" || { echo "[warning] workspace missing; failure tracking skipped"; exit 0; }
       [ -n "${FORK_GL_TOKEN:-}" ] || { echo "[warning] FORK_GL_TOKEN unset; failure tracking skipped"; exit 0; }
       tag="unknown"
       [ -f .fork-rebuild-state ] && while IFS='=' read -r k v; do
