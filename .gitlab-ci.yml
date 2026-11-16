@@ -123,7 +123,9 @@ build:omp-fork-builder:
   rules:
     - if: $BUILD_IMAGE == "1"
     - if: $BUILD_IMAGE == "true"
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    # changes: is only meaningful on push events — on schedule/api pipelines
+    # it evaluates true and would rebuild the image on every daily poll.
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
       changes:
         - images/omp-fork-builder/**/*
         - .gitlab-ci.yml
@@ -231,9 +233,11 @@ rebuild:
 
     # ---- Token sanity (fail loud before 30 minutes of build) ----------------
     - |
+      # GET /projects/:id is not in the CI-job-token allowlist (404); the
+      # packages endpoint is — and it is what the token exists to serve here.
       code="$(curl -sS -o /dev/null -w '%{http_code}' -H "Job-Token: ${CI_JOB_TOKEN}" \
-        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}")"
-      [ "$code" = 200 ] || { echo "[error] job token cannot read the project API (HTTP ${code})"; exit 1; }
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages")"
+      [ "$code" = 200 ] || { echo "[error] job token cannot list project packages (HTTP ${code})"; exit 1; }
       if [ -n "${FORK_GL_TOKEN:-}" ]; then
         code="$(curl -sS -o /dev/null -w '%{http_code}' -H "PRIVATE-TOKEN: ${FORK_GL_TOKEN}" "${CI_API_V4_URL}/user")"
         [ "$code" = 200 ] || { echo "[error] FORK_GL_TOKEN rejected (HTTP ${code})"; exit 1; }
