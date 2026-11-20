@@ -567,7 +567,10 @@ rebuild:
             # in one process, and v19.0.1 ships two sdk-session-isolation cases
             # that fail only there. Rerun every failing file by itself; a real
             # regression fails alone too.
-            mapfile -t flaked < <(grep -oE '/[^ :]+\.test\.ts' /tmp/battery.log | sort -u)
+            # Only stack-frame paths under the checkout count: bun prints
+            # "(<abs path>:line:col)" for every failed expectation, while the
+            # rest of the log is full of relative fragments from command echoes.
+            mapfile -t flaked < <(grep -oE "${CI_PROJECT_DIR}/[^ :]+\.test\.ts" /tmp/battery.log | sort -u)
             isolated_red=0
             for f in "${flaked[@]}"; do
                case "$f" in /*) ;; *) f="${CI_PROJECT_DIR}/${f}" ;; esac
