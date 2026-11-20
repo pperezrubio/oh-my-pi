@@ -41,6 +41,7 @@
 		".worktrees/**",
 		".wt/**",
 		".omp/**",
+		".cache/**",
 		"crates/**",
 		"docs/**",
 		"python/**",
