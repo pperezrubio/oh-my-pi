@@ -555,9 +555,17 @@ rebuild:
     - |
       set -o pipefail
       bun run check:tools
+      # The runner exports CI_REPOSITORY_URL=http://gitlab-ci-token:<jobtoken>@…,
+      # and the secrets collector treats the userinfo password of any connection
+      # URL as an obfuscate-mode secret even though the NAME carries no secret
+      # marker (so the tests' own env scrubber never clears it). That mints a
+      # placeholder key and breaks the sdk-session-isolation assertions on stock
+      # v19.0.1 as well; no interactive session has the variable, so the battery
+      # runs without it.
+      battery() { ( unset CI_REPOSITORY_URL; bun scripts/ci-test-ts.ts local-ts ); }
       attempt=1
       while :; do
-         if bun scripts/ci-test-ts.ts local-ts 2>&1 | tee /tmp/battery.log; then
+         if battery 2>&1 | tee /tmp/battery.log; then
             break
          fi
          if [ "$attempt" -ge 2 ]; then
@@ -575,7 +583,7 @@ rebuild:
             for f in "${flaked[@]}"; do
                case "$f" in /*) ;; *) f="${CI_PROJECT_DIR}/${f}" ;; esac
                echo "[warning] rerunning ${f} by itself"
-               timeout 900 bun test "$f" --timeout=120000 || isolated_red=1
+               ( unset CI_REPOSITORY_URL; timeout 900 bun test "$f" --timeout=120000 ) || isolated_red=1
             done
             if [ "${#flaked[@]}" -gt 0 ] && [ "$isolated_red" -eq 0 ]; then
                echo "[warning] battery flakes: ${#flaked[@]} file(s) failed only inside the shared bucket and pass alone: ${flaked[*]}"
