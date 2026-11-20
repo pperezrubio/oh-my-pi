@@ -198,23 +198,26 @@ providers:
     apiKey: "!cat ${AGENT_DIR}/litellm.key"
     api: openai-completions
     models:
-      - id: z-ai/glm-5.3
-        name: "Z.ai GLM 5.3 (repair lane)"
+      # ids exactly as llm-proxy serves them; the lane's /models is the source
+      # of truth (a wrong id only ever fails at request time)
+      - id: gx10/deepseek-v4.1-flash-1017
+        name: "DeepSeek V4.1 Flash 1017 (GX10 repair lane)"
+        reasoning: true
+        reasoningContentField: reasoning_content
+        input: [text, image]
+        contextWindow: 409600
+        maxTokens: 32768
+        compat:
+          supportsDeveloperRole: false
+          supportsToolChoice: true
+          supportsUsageInStreaming: true
+      - id: gx10/glm-5.3
+        name: "Z.ai GLM 5.3 (GX10 repair lane fallback)"
         reasoning: true
         reasoningContentField: reasoning_content
         input: [text]
         contextWindow: 1000000
         maxTokens: 32768
-        compat:
-          supportsToolChoice: true
-          supportsReasoningEffort: true
-      - id: z-ai/glm-5.3-flash
-        name: "Z.ai GLM 5.3 Flash (repair lane fallback)"
-        reasoning: true
-        reasoningContentField: reasoning_content
-        input: [text]
-        contextWindow: 1000000
-        maxTokens: 131072
         compat:
           supportsToolChoice: true
           supportsReasoningEffort: true

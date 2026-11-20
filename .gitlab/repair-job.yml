@@ -60,8 +60,9 @@ repair:
     # make merge-base lie about the fork point
     GIT_DEPTH: "0"
     GIT_STRATEGY: fetch
-    # agent lane — overridable per pipeline or per schedule
-    REPAIR_MODEL: "litellm/z-ai/glm-5.3"
+    # agent lane — overridable per pipeline or per schedule. The model id is the
+    # one llm-proxy serves; the proxy's /models list is the source of truth.
+    REPAIR_MODEL: "litellm/gx10/deepseek-v4.1-flash-1017"
     REPAIR_MAX_ATTEMPTS: "3"
     REPAIR_AGENT_MAX_TIME: "35m"
     REPAIR_AGENT_MAX_COST: "8"
