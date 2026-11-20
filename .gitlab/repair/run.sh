@@ -189,37 +189,46 @@ mkdir -p "$AGENT_DIR"
 umask 077
 printf '%s' "$LITELLM_API_KEY" >"$AGENT_DIR/litellm.key"
 cat >"$AGENT_DIR/models.yml" <<EOF
-litellm:
-  name: LiteLLM (CI repair lane)
-  baseUrl: ${LITELLM_BASE_URL}
-  # resolved at request time from the 0600 key file written by the harness;
-  # the key never lands in this file or in the job trace
-  apiKey: "!cat ${AGENT_DIR}/litellm.key"
-  api: openai-completions
-  models:
-    - id: z-ai/glm-5.3
-      name: "Z.ai GLM 5.3 (repair lane)"
-      reasoning: true
-      reasoningContentField: reasoning_content
-      input: [text]
-      contextWindow: 1000000
-      maxTokens: 32768
-      compat:
-        supportsToolChoice: true
-        supportsReasoningEffort: true
-    - id: z-ai/glm-5.3-flash
-      name: "Z.ai GLM 5.3 Flash (repair lane fallback)"
-      reasoning: true
-      reasoningContentField: reasoning_content
-      input: [text]
-      contextWindow: 1000000
-      maxTokens: 131072
-      compat:
-        supportsToolChoice: true
-        supportsReasoningEffort: true
+providers:
+  litellm:
+    name: LiteLLM (CI repair lane)
+    baseUrl: ${LITELLM_BASE_URL}
+    # resolved at request time from the 0600 key file written by the harness;
+    # the key never lands in this file or in the job trace
+    apiKey: "!cat ${AGENT_DIR}/litellm.key"
+    api: openai-completions
+    models:
+      - id: z-ai/glm-5.3
+        name: "Z.ai GLM 5.3 (repair lane)"
+        reasoning: true
+        reasoningContentField: reasoning_content
+        input: [text]
+        contextWindow: 1000000
+        maxTokens: 32768
+        compat:
+          supportsToolChoice: true
+          supportsReasoningEffort: true
+      - id: z-ai/glm-5.3-flash
+        name: "Z.ai GLM 5.3 Flash (repair lane fallback)"
+        reasoning: true
+        reasoningContentField: reasoning_content
+        input: [text]
+        contextWindow: 1000000
+        maxTokens: 131072
+        compat:
+          supportsToolChoice: true
+          supportsReasoningEffort: true
 EOF
 umask 022
 export PI_CODING_AGENT_DIR="$AGENT_DIR"
+
+# `providers:` is the only root key the model registry reads. A provider written
+# at the root is ignored without a warning and surfaces only as the agent
+# dying with "Model ... not found", so prove the model resolved before the turn.
+bun packages/coding-agent/src/cli.ts models --json >/tmp/omp-models.json 2>/dev/null \
+   || die "the source-build omp could not list models"
+jq -e --arg s "$REPAIR_MODEL" 'any(.models[]?; .selector == $s)' /tmp/omp-models.json >/dev/null \
+   || die "model ${REPAIR_MODEL} did not load from ${AGENT_DIR}/models.yml"
 
 lane_code="$(curl -s -o /tmp/litellm-models.json -w '%{http_code}' \
    -H "Authorization: Bearer $(cat "$AGENT_DIR/litellm.key")" "${LITELLM_BASE_URL}/models")"
