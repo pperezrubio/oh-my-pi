@@ -329,8 +329,8 @@ printf '{"attempts": %d, "last_mode": "%s", "last_pipeline": %s, "last_push": "%
 # buy a free extra repair on the next nightly run
 curl -fsS -X PUT -H "JOB-TOKEN: ${CI_JOB_TOKEN}" \
    --data-binary @/tmp/state.json \
-   "${STATE_URL}?status=message" >/dev/null \
-   || warn "could not persist the attempt counter (registry PUT failed)"
+   "${STATE_URL}" >/dev/null 2>/tmp/state-put.err \
+   || warn "could not persist the attempt counter (registry PUT failed: $(head -c 300 /tmp/state-put.err 2>/dev/null))"
 
 say "re-triggering the pipeline on ${CI_DEFAULT_BRANCH}"
 resp="$(curl -fsS -X POST -H "PRIVATE-TOKEN: ${FORK_GL_TOKEN}" \
