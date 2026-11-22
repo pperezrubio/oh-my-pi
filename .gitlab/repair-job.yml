@@ -59,7 +59,9 @@ repair:
     # the rebase needs full history plus the upstream tags; GIT_DEPTH would
     # make merge-base lie about the fork point
     GIT_DEPTH: "0"
-    GIT_STRATEGY: fetch
+    # same AVX pin as the rebuild: the agent's battery verification and the
+    # pre-agent sanity runs execute the same regex-JIT code
+    KUBERNETES_NODE_SELECTOR_CPU: "NodeType=avx"
     # agent lane — overridable per pipeline or per schedule. The model id is the
     # one llm-proxy serves; the proxy's /models list is the source of truth.
     REPAIR_MODEL: "litellm/gx10/deepseek-v4.1-flash-1017"

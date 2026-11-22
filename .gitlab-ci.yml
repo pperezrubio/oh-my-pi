@@ -159,7 +159,10 @@ rebuild:
   variables:
     # The rebase needs the full history of FIX_BRANCH and of upstream.
     GIT_DEPTH: "0"
-    GIT_STRATEGY: fetch
+    # bun's JSC misparses emitted WASM on the pre-AVX E5620 blades
+    # (deterministic regex-JIT battery failures, 2026-11-22; green on every
+    # AVX node with identical code and image). Pin the battery to AVX CPUs.
+    KUBERNETES_NODE_SELECTOR_CPU: "NodeType=avx"
   cache:
     # GH key: fork-bazel-<os>-<hashFiles(Cargo.lock, MODULE.bazel.lock,
     # rust-toolchain.toml, .bazelversion, bazel/**, crates/**)> with
