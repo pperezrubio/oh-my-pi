@@ -291,7 +291,10 @@ describe("write tool read projection guard", () => {
 		expect(resourceContent).toContain("resource 60");
 	});
 
-	it.skipIf(process.platform === "win32")(
+	// root ignores file permission bits, so the locked-file sub-case (chmod
+	// 0200 -> EACCES) cannot reproduce; the GitLab fork's CI build container
+	// runs as uid 0 (2026-11-22, pipeline 3616)
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
 		"writes a bounded projection to a new ssh:// file and still guards existing ones",
 		async () => {
 			vi.spyOn(capability, "loadCapability").mockResolvedValue({ items: [], all: [], warnings: [], providers: [] });
