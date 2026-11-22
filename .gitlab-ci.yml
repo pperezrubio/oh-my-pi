@@ -856,7 +856,8 @@ regex-diag:
   stage: diag
   image: $OMP_BUILDER_IMAGE
   needs: []
-  resource_group: fork-auto-rebuild
+  # deliberately NOT in the fork-auto-rebuild resource group: the diag must
+  # run while a rebuild holds the group
   interruptible: true
   timeout: 30m
   rules:
