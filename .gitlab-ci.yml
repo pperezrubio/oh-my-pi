@@ -40,6 +40,8 @@ workflow:
 stages:
   - prepare
   - rebuild
+  - diag
+
 
 variables:
   BUILDKIT_VERSION: "v0.32.2"
@@ -845,3 +847,43 @@ rebuild:
     - if: $CI_PIPELINE_SOURCE == "api"
     - if: $CI_PIPELINE_SOURCE == "trigger"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# =============================================================================
+# diag — one-off diagnostics for the linux-only regex-JIT WASM battery flake.
+# Never runs unless a pipeline is explicitly triggered with REGEX_DIAG=1.
+# =============================================================================
+regex-diag:
+  stage: diag
+  image: $OMP_BUILDER_IMAGE
+  needs: []
+  resource_group: fork-auto-rebuild
+  interruptible: true
+  timeout: 30m
+  rules:
+    - if: $REGEX_DIAG == "1"
+  script:
+    - bun install --frozen-lockfile
+    - |
+      echo "== run 1-6: stock, parallel=8 =="
+      for i in 1 2 3 4 5 6; do
+        bun test packages/utils/test/regex-jit.test.ts packages/utils/test/regex-jit-skip.test.ts packages/utils/test/linear-regexp.test.ts --parallel=8 --timeout=120000 2>&1 | tail -2
+      done
+    - |
+      echo "== run 7-8: stock, serial =="
+      for i in 7 8; do
+        bun test packages/utils/test/regex-jit.test.ts packages/utils/test/regex-jit-skip.test.ts packages/utils/test/linear-regexp.test.ts --timeout=120000 2>&1 | tail -2
+      done
+    - |
+      echo "== run 9-10: JIT disabled =="
+      for i in 9 10; do
+        BUN_JSC_useJIT=0 bun test packages/utils/test/regex-jit.test.ts packages/utils/test/regex-jit-skip.test.ts packages/utils/test/linear-regexp.test.ts --parallel=8 --timeout=120000 2>&1 | tail -2
+      done
+    - |
+      echo "== emit determinism probe =="
+      bun -e '
+      import { LinearRegExp } from "./packages/utils/src/regex/linear-regexp.ts";
+      const pats = ["a+[b-c]*d?e", "(?:x{2,4}|y[0-9]z)+w", "[^a-y]{3,}q.*z"];
+      for (const p of pats) {
+        try { new LinearRegExp(p); console.log("compiled", p); }
+        catch (e) { console.log("FAILED", p, String(e).slice(0, 120)); }
+      }'
