@@ -856,7 +856,7 @@ regex-diag:
   stage: diag
   image: $OMP_BUILDER_IMAGE
   variables:
-    KUBERNETES_NODE_SELECTOR: "NodeType=ivybridge"
+    KUBERNETES_NODE_SELECTOR_CPU: "NodeType=ivybridge"
   needs: []
   # deliberately NOT in the fork-auto-rebuild resource group: the diag must
   # run while a rebuild holds the group
