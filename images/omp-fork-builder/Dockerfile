@@ -46,9 +46,13 @@ RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.
     && rm -rf /var/lib/apt/lists/*
 
 # [2] bun — pinned to the repo's packageManager field; bump both together.
+#     2026-11-22 deviation: image carries 1.4.5 while packageManager stays
+#     bun@1.4.4 — 1.4.4's linux-x64 JSC nondeterministically rejects emitted
+#     WASM under parallel load on the pre-AVX E5620 workers (regex-jit battery
+#     flakes, fork pipelines 3481/3499/3551); re-pin both once upstream bumps.
 #     Checksums: https://github.com/oven-sh/bun/releases/download/bun-v<BUN_VERSION>/SHASUMS256.txt
-ARG BUN_VERSION=1.4.4
-ARG BUN_SHA256=bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c
+ARG BUN_VERSION=1.4.5
+ARG BUN_SHA256=94559b3b528995a49452f9f2404cec74f2efd7d06e0a000a8cd214b02c3666eb
 RUN curl -fsSL --retry 3 -o /tmp/bun.zip \
       "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64.zip" \
     && echo "${BUN_SHA256}  /tmp/bun.zip" | sha256sum -c - \
