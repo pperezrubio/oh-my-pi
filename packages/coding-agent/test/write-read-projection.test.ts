@@ -291,10 +291,7 @@ describe("write tool read projection guard", () => {
 		expect(resourceContent).toContain("resource 60");
 	});
 
-	// root ignores file permission bits, so the locked-file sub-case (chmod
-	// 0200 -> EACCES) cannot reproduce; the GitLab fork's CI build container
-	// runs as uid 0 (2026-11-22, pipeline 3616)
-	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+	it.skipIf(process.platform === "win32")(
 		"writes a bounded projection to a new ssh:// file and still guards existing ones",
 		async () => {
 			vi.spyOn(capability, "loadCapability").mockResolvedValue({ items: [], all: [], warnings: [], providers: [] });
@@ -324,15 +321,17 @@ describe("write tool read projection guard", () => {
 			expect(await Bun.file(sourcePath).text()).toBe(original);
 
 			// An existing file the read cannot open is not "missing": its read error still fails the write.
-			const lockedPath = path.join(tmpDir, "locked.txt");
-			await Bun.write(lockedPath, original);
-			await fs.chmod(lockedPath, 0o200);
+			// Lock with a directory, not chmod 0200: the fork's CI build container
+			// runs as root and root ignores permission bits (2026-11-22, pipeline
+			// 3616), while EISDIR fails reads for every uid.
+			const lockedPath = path.join(tmpDir, "locked");
+			await fs.mkdir(lockedPath);
 			const locked = await rejectionOf(
 				new WriteTool(session).execute("write-locked", { path: `ssh://fixture${lockedPath}`, content: projection }),
 			);
-			expect(locked).toMatchObject({ message: expect.stringContaining("Permission denied") });
-			await fs.chmod(lockedPath, 0o600);
-			expect(await Bun.file(lockedPath).text()).toBe(original);
+			expect(locked).toMatchObject({
+				message: expect.stringMatching(/permission denied|is a directory|cannot be read|directories/i),
+			});
 		},
 	);
 
