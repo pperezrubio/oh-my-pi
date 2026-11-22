@@ -59,6 +59,10 @@ variables:
   RELEASE_TAG_PREFIX: "fork-"
   # Upstream's per-test wall-clock ceiling (see ci.yml).
   OMP_TEST_TIMEOUT: "120"
+  # The rebuild pod's cpu_limit is 4.5 cores but os.availableParallelism()
+  # reports the node's full core count, oversubscribing the battery ~3x and
+  # producing rotating wall-clock test timeouts (2026-11-22); pin the budget.
+  OMP_TEST_CPU_BUDGET: "4"
 
 default:
   tags:
@@ -155,7 +159,7 @@ rebuild:
   # publish job is not green.
   resource_group: fork-auto-rebuild
   interruptible: false
-  timeout: 3h
+  timeout: 6h
   variables:
     # The rebase needs the full history of FIX_BRANCH and of upstream.
     GIT_DEPTH: "0"

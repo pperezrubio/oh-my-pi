@@ -644,7 +644,7 @@ const FILE_OVERSUBSCRIBE = 2;
 // above the width it asked for. A chunk that runs alone still gets everything,
 // so the sequential CI path is unchanged.
 function budgetedParallel(requested: number, poolWidth: number): number {
-	const budget = Math.max(1, os.availableParallelism()) * FILE_OVERSUBSCRIBE;
+	const budget = Math.max(1, Number(Bun.env.OMP_TEST_CPU_BUDGET) || os.availableParallelism()) * FILE_OVERSUBSCRIBE;
 	return Math.max(1, Math.min(requested, Math.floor(budget / poolWidth)));
 }
 
