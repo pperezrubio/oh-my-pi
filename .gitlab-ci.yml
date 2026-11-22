@@ -863,6 +863,7 @@ regex-diag:
   rules:
     - if: $REGEX_DIAG == "1"
   script:
+    - git checkout -f -B fix/local-patch-stack origin/fix/local-patch-stack
     - bun install --frozen-lockfile
     - |
       echo "== run 1-6: stock, parallel=8 =="
