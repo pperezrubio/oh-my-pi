@@ -16,7 +16,8 @@ import { getTab, releaseTab, runInTab } from "@oh-my-pi/pi-coding-agent/tools/br
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import puppeteer, { type Browser, type Page } from "puppeteer-core";
+import { type Browser, type Page } from "puppeteer-core";
+import { launchChrome } from "./chrome-launch";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -297,7 +298,7 @@ describe("relay tabs Chrome detaches omp from", () => {
 		if (!CHROMIUM_AVAILABLE) return;
 		const executablePath = await ensureChromiumExecutable();
 		if (!executablePath) throw new Error("Chromium executable missing");
-		chromium = await puppeteer.launch({
+		chromium = await launchChrome({
 			executablePath,
 			headless: true,
 			args: ["--no-first-run", ...RENDERER_PRIORITY_ARGS],

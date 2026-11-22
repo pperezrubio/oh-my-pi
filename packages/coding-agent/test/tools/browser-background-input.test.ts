@@ -25,7 +25,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
-import puppeteer, { type Browser, type Page, type WebWorker } from "puppeteer-core";
+import { type Browser, type Page, type WebWorker } from "puppeteer-core";
+import { launchChrome } from "./chrome-launch";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -117,7 +118,7 @@ async function withRelay(run: (fixture: RelayFixture) => Promise<void>): Promise
 		await Bun.write(backgroundPath, `chrome.storage.local.set({ port: ${port} }).then(() => {\n${background}\n});`);
 		const extensionId = await unpackedExtensionId(extensionDir);
 		if (!extensionId) throw new Error("Missing relay extension directory");
-		browser = await puppeteer.launch({
+		browser = await launchChrome({
 			executablePath: await ensureChromiumExecutable(),
 			headless: true,
 			pipe: true,
@@ -208,7 +209,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("background tab input", () => {
 
 	it("drives an app CDP URL tab in the background", async () => {
 		const port = await findFreeCdpPort();
-		const browser = await puppeteer.launch({
+		const browser = await launchChrome({
 			executablePath: await ensureChromiumExecutable(),
 			headless: true,
 			args: [

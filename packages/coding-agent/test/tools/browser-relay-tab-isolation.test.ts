@@ -34,6 +34,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { getPuppeteerDir } from "@oh-my-pi/pi-utils";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import puppeteer, { type Browser, type Page, type Protocol } from "puppeteer-core";
+import { launchChrome } from "./chrome-launch";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -175,7 +176,7 @@ async function launchRelayFixture(
 				download: { default_directory: downloads, prompt_for_download: false },
 			}),
 		);
-		const browser = await puppeteer.launch({
+		const browser = await launchChrome({
 			executablePath: await ensureChromiumExecutable(),
 			headless: true,
 			pipe: true,

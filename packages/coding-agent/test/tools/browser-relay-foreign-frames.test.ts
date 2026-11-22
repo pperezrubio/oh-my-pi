@@ -5,7 +5,7 @@ import {
 	RENDERER_PRIORITY_ARGS,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { type HiddenFrame, isHiddenFrame } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
-import puppeteer from "puppeteer-core";
+import { launchChrome } from "./chrome-launch";
 import { onForeignFramesHidden, pastForeignFrames } from "../../../browser-relay/extension/foreign-frames";
 import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
@@ -188,7 +188,7 @@ describe("pastForeignFrames", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"hides the emptied menu frame, so the button under it takes the click",
 		async () => {
-			const browser = await puppeteer.launch({
+			const browser = await launchChrome({
 				executablePath: await ensureChromiumExecutable(),
 				headless: true,
 				args: ["--no-first-run", ...RENDERER_PRIORITY_ARGS],
@@ -251,7 +251,7 @@ describe("pastForeignFrames", () => {
 							)
 						: new Response("<title>Login</title>", { headers: { "Content-Type": "text/html" } }),
 			});
-			const browser = await puppeteer.launch({
+			const browser = await launchChrome({
 				executablePath: await ensureChromiumExecutable(),
 				headless: true,
 				args: ["--no-first-run", ...RENDERER_PRIORITY_ARGS],
