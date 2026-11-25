@@ -62,6 +62,7 @@ import type { ClientBridge, ClientBridgePermissionOutcome } from "./client-bridg
 import { toolReadsSkillUris } from "../system-prompt";
 
 import type { CustomMessage } from "./messages";
+import { notePromptDrift } from "./prompt-drift";
 import { SESSION_AGENT_NOTICE_TYPE } from "./queued-messages";
 import type { SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
@@ -370,6 +371,8 @@ export class SessionTools {
 	#restoredTranscript: { reply: AgentMessage; promptDigest: string } | undefined;
 	/** Base-prompt digest of the last primary model call, until its reply ends. */
 	#capturedPromptDigest: string | undefined;
+	/** Base prompt the previous primary model call was built from, for drift diagnostics. */
+	#lastCapturedPrompt: { digest: string; blocks: readonly string[] } | undefined;
 	/** Base-prompt digest each primary reply with provider output was produced under. */
 	readonly #replyPromptDigests = new WeakMap<AgentMessage, string>();
 	/**
@@ -1460,7 +1463,19 @@ export class SessionTools {
 	 */
 	recordPrimaryModelCall(prompt: string[]): void {
 		this.#restoredTranscript = undefined;
-		this.#capturedPromptDigest = systemPromptDigest(this.baseOfSystemPrompt(prompt));
+		const base = this.baseOfSystemPrompt(prompt);
+		const digest = systemPromptDigest(base);
+		this.#capturedPromptDigest = digest;
+		// Before the first call of this process, compare against the digest the
+		// transcript recorded: a resume that rebuilds a different prompt shows up too.
+		const recorded = this.#lastCapturedPrompt === undefined ? this.recordedPromptDigest() : undefined;
+		notePromptDrift(
+			this.#host.sessionManager.getSessionId(),
+			digest,
+			base,
+			this.#lastCapturedPrompt ?? (recorded === undefined ? undefined : { digest: recorded }),
+		);
+		this.#lastCapturedPrompt = { digest, blocks: base };
 	}
 
 	/**
