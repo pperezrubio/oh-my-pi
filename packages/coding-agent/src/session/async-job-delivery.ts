@@ -11,11 +11,11 @@
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobType } from "../async";
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
-import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
+import type { StructuredSubagentOutput } from "../task/task-details";
 import { escapeHarnessTags } from "./harness-tags";
 import type { CustomMessage } from "./messages";
-import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { truncateMiddle } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import type { OutputMeta } from "../tools/output-meta-format";
+import { truncateMiddle } from "../tools/streaming-output";
 
 /**
  * `customType` of the injected async-result follow-up message. The task
@@ -110,6 +110,20 @@ export function taskAgentHandles(
 	return job.status === "completed" && job.agentOutputPublished !== false ? "agent" : "history";
 }
 
+/** Longest command a completion header quotes before eliding its middle. */
+const COMMAND_IDENTITY_MAX_CHARS = 400;
+
+/**
+ * A bash command on one line, middle elided past the cap so commands differing only at the end stay distinct.
+ * Names the job in the notices that report on it: its completion and its `notify` matches.
+ */
+export function commandIdentity(command: string): string {
+	const oneLine = command.trim().replace(/\r\n|\r|\n/g, "\\n");
+	if (oneLine.length <= COMMAND_IDENTITY_MAX_CHARS) return oneLine;
+	const keep = COMMAND_IDENTITY_MAX_CHARS / 2;
+	return `${oneLine.slice(0, keep)}…${oneLine.slice(-keep)}`;
+}
+
 export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
 	if (entries.length === 0) return null;
 	const jobs = entries.map(entry => {
@@ -127,7 +141,12 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 		// Job output (a command's output, or a task's `<task-result>` around a
 		// subagent's output), a subagent's payload and its validation error are
 		// text the job controls: it must not close the `<system-notice>` it renders
-		// into or open a forged harness block.
+		// into or open a forged harness block. Neither may the label naming it
+		// or a /tan job's quoted user request.
+		// A bash job is named by its whole command: its label truncates the tail, so parallel jobs
+		// that share a prefix would otherwise read the same in the notice that delivers them.
+		const command = entry.job?.type === "bash" ? entry.job.process?.command : undefined;
+		const headerLabel = command === undefined ? entry.job?.label : commandIdentity(command);
 		return {
 			jobId: entry.jobId,
 			agentUrlId,
@@ -138,6 +157,9 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			status: entry.job?.status,
 			agentId: entry.job?.agentId,
 			label: entry.job?.label,
+			headerLabel: headerLabel ? escapeHarnessTags(headerLabel) : undefined,
+			request: entry.job?.request === undefined ? undefined : escapeHarnessTags(entry.job.request),
+			namedByCommand: command !== undefined,
 			durationMs: entry.durationMs,
 			meta: entry.job?.latestDetails?.meta,
 			structured,

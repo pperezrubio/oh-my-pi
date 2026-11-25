@@ -22,7 +22,7 @@ import type { ConfigError } from "../config/config-file";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { discoverAndLoadExtensions, ExtensionRunner, emitSessionShutdownEvent } from "../extensibility/extensions";
-import { discoverAuthStorage } from "../sdk";
+import { discoverSessionAuthStorage as discoverAuthStorage } from "../session/auth-broker-config";
 import { SessionManager } from "../session/session-manager";
 import { EventBus } from "../utils/event-bus";
 
@@ -368,6 +368,14 @@ export async function runModelsListing(options: RunModelsListingOptions): Promis
 
 		for (const warning of modelRegistry.drainConfigWarnings()) {
 			process.stderr.write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
+		}
+		// A failed fetch otherwise looks identical to a provider with no models.
+		const failures = modelRegistry.getDiscoveryFailures({ runtimeOnly: action !== "refresh" });
+		for (const { provider, status, error } of failures) {
+			const detail = error?.replace(/\s+/g, " ").trim();
+			process.stderr.write(
+				`${chalk.yellow(`Warning: ${provider} model discovery failed (${status}): ${detail}`)}\n`,
+			);
 		}
 		renderProviderModels(modelRegistry, action, pattern, json, kind);
 	} finally {

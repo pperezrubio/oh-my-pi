@@ -18,14 +18,15 @@ import { getGitLabDuoModels } from "@oh-my-pi/pi-ai/providers/gitlab-duo";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { $env } from "@oh-my-pi/pi-utils";
 import { buildModel } from "../src/build";
-import { isRetiredProvider } from "../src/compat/behavior";
+import { isExcludedModel, isRetiredProvider } from "../src/compat/behavior";
 import { collapseVariants } from "../src/compat/collapse";
 import { providerEntries, providerEntry, seedModels } from "../src/compat/providers";
 import type { CompiledProvider } from "../src/compat/types";
 import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from "../src/discovery/antigravity";
+import { encodeModelCatalog } from "../src/model-catalog-format";
 import { createModelManager } from "../src/model-manager";
 import { resolveModelTokenizer } from "../src/model-tokenizer";
-import prevModelsJson from "../src/models.json" with { type: "json" };
+import { getBundledModels, getBundledProviders } from "../src/models";
 import { toModelSpec } from "../src/provider-models/bundled-references";
 import {
 	allowsUnauthenticatedCatalogDiscovery,
@@ -42,6 +43,7 @@ import {
 	kimiCodeMaxTokens,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
 	mapModelsDevToModels,
+	NANO_GPT_THINKING_SUFFIX_RE,
 	openCodeGoBaseUrlForApi,
 	projectOpenAIProReasoningAliases,
 	stripFireworksDeepSeekThinkingToggle,
@@ -61,15 +63,23 @@ import {
 
 const packageRoot = path.join(import.meta.dir, "..");
 
+// Generator policies may mutate nested specs, so each snapshot row owns its values.
+const prevModelsJson: Record<string, Record<string, Model<Api>>> = Object.fromEntries(
+	getBundledProviders().map(provider => [
+		provider,
+		Object.fromEntries(getBundledModels(provider).map(model => [model.id, structuredClone(model)])),
+	]),
+);
+
 /**
- * Local/self-hosted providers (Ollama, vLLM, LM Studio, LiteLLM). Their model
+ * Local/self-hosted providers (Ollama, vLLM, LM Studio, LiteLLM, Bifrost). Their model
  * catalogs are whatever happens to be running on the machine that invokes the
  * generator — bundling them would leak machine-specific endpoints (e.g.
  * `http://localhost:4000/v1`) into the committed snapshot. They are discovered
  * dynamically at runtime instead, so they are never fetched during generation
  * and never written to models.json.
  */
-const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litellm"]);
+const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litellm", "bifrost"]);
 /**
  * Credential-scoped catalogs (Devin's Cascade roster is gated per account/team
  * via `allowed_model_uids`). Fetching them during generation would bake one
@@ -81,14 +91,15 @@ const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litell
  * runtime discovery is authoritative per credential (mirrors the GitLab Duo
  * fallback-only policy below).
  */
-const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin", "sambanova"]);
+const CREDENTIAL_SCOPED_PROVIDERS = new Set(["arkanecloud", "devin", "sambanova", "otari", "modal"]);
 /**
  * Providers whose authored seed is the complete documented fallback
  * catalog: their previous-snapshot rows are never resurrected, so an id
  * the host retired (e.g. CoralBricks' GLM 5.3 Flash, 2026-10-07) cannot
- * return as a previous-snapshot zombie.
+ * return as a previous-snapshot zombie. `local` lists exactly the on-device
+ * workers this build ships, so a replaced one (Kokoro → Phonon) drops out.
  */
-const STATIC_SEED_COMPLETE_PROVIDERS = new Set(["yolo-auto", "coralbricks"]);
+const STATIC_SEED_COMPLETE_PROVIDERS = new Set(["yolo-auto", "coralbricks", "local"]);
 
 /**
  * The rows one provider's authored seed (`rules/providers/<id>.kdl`) contributes
@@ -136,7 +147,8 @@ function seededProviders(precedence: "upstream" | "seed"): CompiledProvider[] {
 
 /**
  * Restores unfetched rows from a previous generated catalog while pruning
- * providers whose snapshots are no longer valid.
+ * providers whose snapshots are no longer valid and ids `exclude-models` now
+ * drops. The current regen re-adds authored seed rows itself.
  */
 export function mergePreviousSnapshotModels(
 	models: readonly ModelSpec[],
@@ -155,7 +167,8 @@ export function mergePreviousSnapshotModels(
 				!CREDENTIAL_SCOPED_PROVIDERS.has(model.provider) &&
 				!STATIC_SEED_COMPLETE_PROVIDERS.has(model.provider) &&
 				!isRetiredProvider(model.provider) &&
-				!excludedProviders.has(model.provider)
+				!excludedProviders.has(model.provider) &&
+				!isExcludedModel(model.provider, model.id)
 			) {
 				merged.push(model);
 			}
@@ -263,8 +276,22 @@ async function loadModelsDevData(): Promise<ModelSpec[]> {
 }
 
 function createGlobalModelsDevReferenceMap(modelsDevModels: readonly ModelSpec[]): Map<string, ModelSpec> {
-	const references = new Map<string, ModelSpec>();
+	// NanoGPT publishes a model's thinking route as a separate `<id>:thinking`
+	// row, so its base row carries `reasoning: false`. The base is still
+	// reasoning-capable when that sibling exists; without this the sibling's
+	// larger limits make the non-thinking row the cross-provider reference and
+	// its `reasoning: false` overwrites every same-id row (#18673).
+	const thinkingBaseKeys = new Set<string>();
 	for (const model of modelsDevModels) {
+		const match = NANO_GPT_THINKING_SUFFIX_RE.exec(model.id);
+		if (match && model.reasoning) {
+			thinkingBaseKeys.add(`${model.provider}/${model.id.slice(0, match.index)}`);
+		}
+	}
+	const references = new Map<string, ModelSpec>();
+	for (const row of modelsDevModels) {
+		const model =
+			!row.reasoning && thinkingBaseKeys.has(`${row.provider}/${row.id}`) ? { ...row, reasoning: true } : row;
 		const existing = references.get(model.id);
 		if (!existing) {
 			references.set(model.id, model);
@@ -284,7 +311,7 @@ function createGlobalModelsDevReferenceMap(modelsDevModels: readonly ModelSpec[]
 	return references;
 }
 
-function applyGlobalModelsDevFallback(
+export function applyGlobalModelsDevFallback(
 	models: readonly ModelSpec[],
 	modelsDevModels: readonly ModelSpec[],
 ): ModelSpec[] {
@@ -451,11 +478,7 @@ async function getOAuthAccessFromStorage(provider: OAuthProvider): Promise<OAuth
 			// expired-but-refreshable credential gets rotated before discovery,
 			// and identity metadata (accountId/projectId/email) flows through
 			// for Codex/Antigravity downstream calls.
-			let access = await authStorage.oauth.access(provider);
-			if (!access && provider === "google-antigravity") {
-				access = await authStorage.oauth.access("google-gemini-cli");
-			}
-			return access ?? null;
+			return (await authStorage.oauth.access(provider)) ?? null;
 		} finally {
 			authStorage.close();
 		}
@@ -475,7 +498,7 @@ async function getOAuthAccessFromStorage(provider: OAuthProvider): Promise<OAuth
 async function fetchAntigravityModels(): Promise<ModelSpec<"google-gemini-cli">[]> {
 	const access = await getOAuthAccessFromStorage("google-antigravity");
 	if (!access) {
-		console.log("No Antigravity or Gemini CLI credentials found, will use previous models.");
+		console.log("No Antigravity credentials found, will use previous models.");
 		console.log("Tip: If you are logged in under a specific profile, run with OMP_PROFILE=<name>.");
 		return [];
 	}
@@ -549,6 +572,14 @@ async function fetchCodexDiscoveryModels(): Promise<ModelSpec<"openai-codex-resp
 }
 
 async function generateModels(selectedProvider?: string) {
+	// Retire a single provider without refreshing unrelated model rows.
+	if (selectedProvider !== undefined && isRetiredProvider(selectedProvider)) {
+		const models = { ...prevModelsJson };
+		delete models[selectedProvider];
+		await Bun.write(path.join(packageRoot, "src/models.json"), encodeModelCatalog(models));
+		console.log(`Removed ${selectedProvider} from src/models.json`);
+		return;
+	}
 	// Fetch models from dynamic sources.
 	const modelsDevModels = await loadModelsDevData();
 	const catalogProviderDescriptors = PROVIDER_DESCRIPTORS.filter(
@@ -585,8 +616,11 @@ async function generateModels(selectedProvider?: string) {
 	const gitLabDuoModels = getGitLabDuoModels().map(model => toModelSpec(model));
 	// Combine models. stencil.so has priority unless a provider's successful endpoint
 	// discovery is authoritative; those endpoint snapshots replace stencil.so rows.
+	// `exclude-models` filters upstream rows as they enter (here, special
+	// discovery, previous snapshot); authored seed rows never pass through it, so
+	// a family exclusion cannot drop a provider's own seeded row.
 	let allModels = applyGlobalModelsDevFallback(
-		[...bundledModelsDevModels, ...catalogProviderModels, ...gitLabDuoModels],
+		filterModelsDevCatalogRows([...bundledModelsDevModels, ...catalogProviderModels, ...gitLabDuoModels]),
 		modelsDevModels,
 	);
 
@@ -620,7 +654,7 @@ async function generateModels(selectedProvider?: string) {
 	for (const discovery of specialDiscoveries) {
 		if (discovery.models.length > 0) {
 			console.log(`Added ${discovery.models.length} models from ${discovery.label} discovery`);
-			allModels.push(...discovery.models);
+			allModels.push(...filterModelsDevCatalogRows(discovery.models));
 			if (discovery.authoritative) {
 				authoritativeSpecialDiscoveryProviders.add(discovery.providerId);
 			}
@@ -648,11 +682,7 @@ async function generateModels(selectedProvider?: string) {
 	// Previous-snapshot entries may carry an older ThinkingConfig vocabulary;
 	// applyGeneratedModelPolicies re-bakes `thinking` for every model, so the
 	// inbound shape is irrelevant beyond identity/pricing/compat fields.
-	allModels = mergePreviousSnapshotModels(
-		allModels,
-		prevModelsJson as unknown as Record<string, Record<string, Model<Api>>>,
-		previousSnapshotExcludedProviders,
-	);
+	allModels = mergePreviousSnapshotModels(allModels, prevModelsJson, previousSnapshotExcludedProviders);
 	allModels = applyGlobalModelsDevFallback(allModels, modelsDevModels);
 	// Previous-snapshot fallbacks can retain a retired client fingerprint. Force
 	// every bundled Copilot model onto the same identity used by live discovery.
@@ -671,12 +701,14 @@ async function generateModels(selectedProvider?: string) {
 	allModels = applyPricingPeerFallback(allModels);
 	allModels = applyKimiCodeMaxTokens(allModels);
 	allModels = applyFireworksDeepSeekReasoningShape(allModels);
-	allModels = filterModelsDevCatalogRows(allModels);
 	allModels = normalizeAntigravityEndpoint(allModels);
 	// Previous-snapshot fallbacks keep their old baseUrl; re-base every OpenCode
-	// Go row so retained rows follow gateway endpoint moves (#15722).
+	// Go row so retained rows follow gateway endpoint moves (#15722). System One
+	// judge rows are not served by the Go gateway; they keep their seeded endpoint.
 	allModels = allModels.map(model =>
-		model.provider === "opencode-go" ? { ...model, baseUrl: openCodeGoBaseUrlForApi(model.api) } : model,
+		model.provider === "opencode-go" && model.api !== "typesafe"
+			? { ...model, baseUrl: openCodeGoBaseUrlForApi(model.api) }
+			: model,
 	);
 	// Normalize display names: gateway author prefixes ("OpenAI: …"), alias
 	// markers ("(latest)"), provider attribution ("(Antigravity)"), and
@@ -741,7 +773,7 @@ async function generateModels(selectedProvider?: string) {
 	// the requested provider in the generated output.
 	const MODELS: Record<string, Record<string, Model<Api>>> = selectedProvider === undefined
 		? {}
-		: { ...(prevModelsJson as unknown as Record<string, Record<string, Model<Api>>>) };
+		: { ...prevModelsJson };
 	if (selectedProvider !== undefined) delete MODELS[selectedProvider];
 	for (const [provider, models] of Object.entries(modelSpecs)) {
 		if (selectedProvider !== undefined && provider !== selectedProvider) continue;
@@ -751,7 +783,7 @@ async function generateModels(selectedProvider?: string) {
 	}
 
 	// Generate JSON file
-	await Bun.write(path.join(packageRoot, "src/models.json"), JSON.stringify(sortObj(MODELS)));
+	await Bun.write(path.join(packageRoot, "src/models.json"), encodeModelCatalog(sortObj(MODELS)));
 	console.log("Generated src/models.json");
 
 	// Print statistics for the rows this run regenerated.

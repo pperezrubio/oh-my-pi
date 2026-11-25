@@ -4,6 +4,7 @@ import {
 	AUTH_RETRY_MAX_ATTEMPTS,
 	isApiKeyResolver,
 	isAuthRetryableError,
+	refreshReasonFor,
 	resolveApiKeyOnce,
 	withAuth,
 	withOAuthAccess,
@@ -232,6 +233,28 @@ describe("withAuth", () => {
 		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false, false, true, true]);
 	});
 
+	it("retains the exhausted key's reset when every rotated API key rejects authentication", async () => {
+		const quota = usageLimitError();
+		const keys: string[] = [];
+		await expect(
+			withAuth(
+				ctx =>
+					ctx.error === undefined
+						? "exhausted"
+						: ctx.lastChance
+							? keys.length === 1
+								? "stale"
+								: undefined
+							: undefined,
+				async key => {
+					keys.push(key);
+					throw key === "exhausted" ? quota : authError();
+				},
+			),
+		).rejects.toBe(quota);
+		expect(keys).toEqual(["exhausted", "stale"]);
+	});
+
 	it("switches accounts before refreshing the same account on usage limits", async () => {
 		const keys: string[] = [];
 		const contexts: ApiKeyResolveContext[] = [];
@@ -320,6 +343,32 @@ describe("withAuth", () => {
 		// All-`lastChance` rotation: a 403 is a valid-token denial, so the
 		// refresh-same step (b) is skipped like on usage limits.
 		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false, true, true, true]);
+	});
+
+	it("refreshes the same login first when a 403 says the OAuth token was revoked", async () => {
+		const revoked = Object.assign(
+			new Error(
+				'403 {"type":"error","error":{"type":"permission_error","message":"OAuth token has been revoked. Please obtain a new token or refresh your existing token."}}',
+			),
+			{ status: 403 },
+		);
+		const contexts: ApiKeyResolveContext[] = [];
+		const result = await withAuth(
+			ctx => {
+				contexts.push(ctx);
+				return ctx.error === undefined ? "revoked-key" : "refreshed-key";
+			},
+			async key => {
+				if (key === "revoked-key") throw revoked;
+				return "success";
+			},
+		);
+
+		expect(result).toBe("success");
+		// Step (b) refresh-same, as for a 401 — not the direct rotation other 403s get.
+		expect(contexts.map(ctx => ctx.lastChance)).toEqual([false, false]);
+		expect(refreshReasonFor(revoked)).toBe("auth-recovery");
+		expect(refreshReasonFor(authError(403))).toBeUndefined();
 	});
 
 	it("leaves a 403 concurrency cap to the transient retry layer", async () => {
@@ -787,6 +836,21 @@ describe("withOAuthAccess", () => {
 		// force-refresh of the same account would duplicate the failed side effect.
 		expect(attempts).toEqual(["dead", "sibling"]);
 		expect(storage.calls).toEqual([{ forceRefresh: undefined }, "rotate", { forceRefresh: undefined }]);
+	});
+	it("retains the quota reset when a rotated OAuth sibling rejects authentication", async () => {
+		const quota = usageLimitError();
+		const storage = fakeStorage({
+			initial: access("exhausted", { credentialId: 1 }),
+			rotated: access("stale", { credentialId: 2 }),
+		});
+		const attempts: string[] = [];
+		await expect(
+			withOAuthAccess(storage, "prov", async a => {
+				attempts.push(a.accessToken);
+				throw a.accessToken === "exhausted" ? quota : authError();
+			}),
+		).rejects.toBe(quota);
+		expect(attempts).toEqual(["exhausted", "stale"]);
 	});
 
 	it("passes the failed OAuth bearer to rotation", async () => {

@@ -96,6 +96,7 @@ describe("AgentSession skill prompt keyword steering", () => {
 				"eval.py": false,
 				"eval.js": true,
 				"eval.workpool.freshAgents": true,
+				"eval.tools.enabled": true,
 			}),
 			modelRegistry,
 		});
@@ -138,6 +139,7 @@ describe("AgentSession skill prompt keyword steering", () => {
 				py: false,
 				js: true,
 				freshAgents: true,
+				perCallModel: false,
 			}),
 		);
 		expect(session.sessionManager.getTurnBudget()).toEqual({ total: 500_000, spent: 0, hard: true });

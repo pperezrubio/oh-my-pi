@@ -1,13 +1,17 @@
 import { describe, expect, it } from "bun:test";
 import { type AgentMessage, filterProviderReplayMessages } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import {
 	buildReplanTitleContext,
+	buildTitleDriftTurns,
 	type CustomMessage,
 	convertMessagesForContextView,
 	convertToLlm,
 	dedupeEphemeralReply,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
+	operatorTitleText,
 	replaceLlmImagesWithText,
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
@@ -22,6 +26,22 @@ function customMessage(customType: string, attribution: "agent" | "user"): Custo
 		content: "Use this skill.",
 		display: true,
 		details: { name: "atomic-commit", path: "/tmp/SKILL.md", lineCount: 1 },
+		attribution,
+		timestamp: 1,
+	};
+}
+
+const COLLAB_IMAGE: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+const QUOTED_THINKING_READER = getBundledModel("openai", "gpt-5.2");
+
+/** A writable-collab peer's prompt (the web Inbox's first instruction) as `CollabHost` submits it. */
+function collabPrompt(content: CustomMessage["content"], attribution: "agent" | "user" = "user"): CustomMessage {
+	return {
+		role: "custom",
+		customType: COLLAB_PROMPT_MESSAGE_TYPE,
+		content,
+		display: true,
+		details: { from: "web" },
 		attribution,
 		timestamp: 1,
 	};
@@ -71,29 +91,20 @@ describe("convertToLlm", () => {
 		expect(otherCustom?.role).toBe("developer");
 	});
 
-	it("replays tool calls saved under an xd:// alias by their bare device name", () => {
-		const saved = {
-			...abortedAssistant([{ type: "toolCall", id: "call_1|fc_1", name: "xd://recall", arguments: { q: "x" } }]),
-			stopReason: "toolUse",
-		} satisfies AssistantMessage;
-		const [assistant, result] = convertToLlm([
-			saved,
+	it("delivers an incoming agent message as a user turn authored by the agent", () => {
+		const [incoming] = convertToLlm([
 			{
-				role: "toolResult",
-				toolCallId: "call_1|fc_1",
-				toolName: "xd://recall",
-				content: [{ type: "text", text: "remembered" }],
-				isError: false,
-				timestamp: 2,
+				role: "custom",
+				customType: "irc:incoming",
+				content: "<irc>\nIncoming IRC message from agent `Main`:\n\nstop building\n</irc>",
+				display: true,
+				details: { id: "1", from: "Main", message: "stop building" },
+				attribution: "agent",
+				timestamp: 1,
 			},
 		]);
 
-		expect(assistant?.role === "assistant" && assistant.content).toEqual([
-			{ type: "toolCall", id: "call_1|fc_1", name: "recall", arguments: { q: "x" } },
-		]);
-		expect(result?.role === "toolResult" && [result.toolCallId, result.toolName]).toEqual(["call_1|fc_1", "recall"]);
-		// Persisted history stays untouched; only the provider view is canonical.
-		expect(saved.content[0]).toMatchObject({ name: "xd://recall" });
+		expect(incoming).toMatchObject({ role: "user", attribution: "agent" });
 	});
 
 	it("strips the demoted trailing thinking run from the assistant LLM view when its continuity message follows", () => {
@@ -105,10 +116,11 @@ describe("convertToLlm", () => {
 			interruptedThinkingContinuity(),
 		];
 
-		const llm = convertToLlm(messages);
+		const llm = convertToLlm(messages, QUOTED_THINKING_READER);
 		const assistant = llm.find(entry => entry.role === "assistant");
 		expect(Array.isArray(assistant?.content) && assistant.content.map(block => block.type)).toEqual(["text"]);
 		expect(llm.some(entry => entry.role === "developer")).toBe(true);
+		expect(convertToLlm(messages)).toEqual(llm.filter(entry => entry.role === "assistant"));
 	});
 
 	it("keeps trailing thinking on the assistant LLM view when no continuity message follows", () => {
@@ -271,7 +283,10 @@ describe("convertMessagesForContextView", () => {
 		]);
 		const messages: AgentMessage[] = [userMessage("question", 1), assistant];
 		const production = convertToLlm(messages);
-		const viewed = convertMessagesForContextView([messages[0], assistant, interruptedThinkingContinuity()]);
+		const viewed = convertMessagesForContextView(
+			[messages[0], assistant, interruptedThinkingContinuity()],
+			QUOTED_THINKING_READER,
+		);
 		const viewedAssistant = viewed[1].message;
 		expect(viewedAssistant.role === "assistant" && viewedAssistant.content.map(block => block.type)).toEqual([
 			"text",
@@ -421,14 +436,6 @@ describe("replaceLlmImagesWithText", () => {
 		const user = scrubbed.find(m => m.role === "user");
 		expect(Array.isArray(user?.content) && user.content).toEqual([{ type: "text", text: "[image omitted]" }]);
 	});
-
-	it("returns the same array reference when there are no image blocks", () => {
-		const converted = convertToLlm([
-			{ role: "user", content: [{ type: "text", text: "hi" }], attribution: "user", timestamp: 1 },
-		]);
-
-		expect(replaceLlmImagesWithText(converted, "[image omitted]")).toBe(converted);
-	});
 });
 
 describe("buildReplanTitleContext", () => {
@@ -483,6 +490,83 @@ describe("buildReplanTitleContext", () => {
 
 		expect(context).toContain("08-app-settings.md");
 		expect(context).not.toContain("07-manual-llm.md");
+	});
+
+	it("anchors a collab peer's opening prompt once a long tool loop fills the recent window", () => {
+		const context = buildReplanTitleContext([
+			collabPrompt("move the inbox rename into the session menu"),
+			...Array.from({ length: 8 }, (_, i) => settledAssistant(`step ${i}`)),
+		]);
+
+		expect(context).toContain("move the inbox rename into the session menu");
+		expect(context).toContain("step 7");
+		expect(context).not.toContain("step 1");
+	});
+});
+
+describe("operatorTitleText", () => {
+	it.each<[string, AgentMessage, string | undefined]>([
+		["a prompt typed in the TUI", userMessage("fix the flaky park tests", 1), "fix the flaky park tests"],
+		["a user /skill: invocation", customMessage(SKILL_PROMPT_MESSAGE_TYPE, "user"), "/skill:atomic-commit"],
+		[
+			"a collab peer's prompt, without its images",
+			collabPrompt([{ type: "text", text: " move the inbox rename " }, COLLAB_IMAGE]),
+			"move the inbox rename",
+		],
+		["an agent-attributed collab prompt", collabPrompt("move the inbox rename", "agent"), undefined],
+		["a collab prompt with no text", collabPrompt([{ type: "text", text: "  " }, COLLAB_IMAGE]), undefined],
+		[
+			"a user message the agent sent",
+			{ role: "user", content: "request budget low", attribution: "agent", timestamp: 1 },
+			undefined,
+		],
+	])("reads the title text of %s", (_case, message, expected) => {
+		expect(operatorTitleText(message)).toBe(expected);
+	});
+});
+
+describe("buildTitleDriftTurns", () => {
+	it("keeps the newest operator prompts and replies, oldest first, within the window, skipping aborted replies", () => {
+		const turns = buildTitleDriftTurns([
+			userMessage("fix parser recovery", 1),
+			settledAssistant("x".repeat(1000)),
+			userMessage("now draft the release notes", 2),
+			abortedAssistant([{ type: "text", text: "half a reply" }]),
+			settledAssistant("y".repeat(1000)),
+			userMessage("publish them", 3),
+			settledAssistant(`Published.${"z".repeat(1500)}`),
+		]);
+
+		expect(turns).toEqual([
+			{ role: "user", text: "now draft the release notes" },
+			{ role: "assistant", text: "y".repeat(1000) },
+			{ role: "user", text: "publish them" },
+			{ role: "assistant", text: `Published.${"z".repeat(990)}` },
+		]);
+	});
+
+	it("leads with the latest operator prompt, still within the window, when a long tool loop fills it", () => {
+		const turns = buildTitleDriftTurns([
+			userMessage("fix parser recovery", 1),
+			userMessage("now draft the release notes", 2),
+			settledAssistant("p".repeat(1000)),
+			settledAssistant("q".repeat(1000)),
+			settledAssistant("r".repeat(1000)),
+			settledAssistant("s".repeat(1000)),
+		]);
+
+		expect(turns.map(turn => turn.text[0])).toEqual(["n", "r", "s"]);
+		expect(turns[0]).toEqual({ role: "user", text: "now draft the release notes" });
+		expect(turns.reduce((chars, turn) => chars + turn.text.length, 0)).toBeLessThanOrEqual(3000);
+	});
+
+	it("reads a collab peer's prompt as the operator prompt", () => {
+		const turns = buildTitleDriftTurns([collabPrompt("move the inbox rename"), settledAssistant("Moved.")]);
+
+		expect(turns).toEqual([
+			{ role: "user", text: "move the inbox rename" },
+			{ role: "assistant", text: "Moved." },
+		]);
 	});
 });
 

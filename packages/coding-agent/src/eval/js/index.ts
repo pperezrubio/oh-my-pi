@@ -51,6 +51,8 @@ export default {
 			reset: opts.reset,
 			onChunk: opts.onChunk,
 			onStatus: opts.onStatus,
+			onReply: opts.onReply,
+			parentToolCallId: opts.parentToolCallId,
 			session: opts.session,
 			localRoots: resolveEvalUrlRoots(opts.session),
 		});

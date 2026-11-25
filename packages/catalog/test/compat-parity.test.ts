@@ -1,12 +1,15 @@
 /**
- * Bake↔runtime consistency gate: for every bundled models.json row, the compat
+ * Bake↔runtime consistency gate: for every bundled catalog row, the compat
  * engine (`resolveModelPolicy`) must reproduce the row's baked `compat` and
  * `thinking` values exactly, so a rule change that is not re-baked into the
  * bundle fails here.
  *
  * Thinking is derived from scratch (`thinking: undefined`), mirroring the
  * generator's `rebakeModelThinking`, except its documented provider-authored
- * exemption rows, which keep their explicit metadata.
+ * exemption rows, which keep their explicit metadata. A baked provisional
+ * (`thinking.unverified`) ladder's `reasoning: true` is derived by `buildModel`,
+ * not capability evidence, so those rows are re-derived from a neutral
+ * `reasoning`, as `resolveModelPolicy` normalizes them.
  *
  * Hermetic (no network). Zero diffs required — a failure names each divergent
  * field as `provider/model.field: baked=X engine=Y`; fix the KDL rules (or a
@@ -16,7 +19,7 @@
 import { describe, expect, test } from "bun:test";
 import { isCollapsedVariantSpec } from "../src/compat/collapse";
 import { resolveModelPolicy } from "../src/compat/resolve";
-import models from "../src/models.json";
+import { getBundledModels, getBundledProviders } from "../src/models";
 import type { Api, Model, ModelSpec } from "../src/types";
 
 function jsonClone<T>(value: T): unknown {
@@ -63,7 +66,11 @@ interface RowLike {
  */
 function keepsExplicitThinking(row: RowLike): boolean {
 	if (isCollapsedVariantSpec(row as unknown as ModelSpec<Api>)) return true;
-	if (row.compatConfig?.thinkingFormat === "chat-template" && row.thinking) return true;
+	if (
+		(row.compatConfig?.thinkingFormat === "chat-template" || row.compatConfig?.thinkingFormat === "kimi") &&
+		row.thinking
+	)
+		return true;
 	if (
 		row.provider === "alibaba-token-plan" &&
 		(row.id === "qwen3.8-max-preview" || row.id === "qwen3.8-max") &&
@@ -78,15 +85,14 @@ function keepsExplicitThinking(row: RowLike): boolean {
 }
 
 describe("compat parity", () => {
-	test("engine reproduces every baked models.json compat/thinking value", () => {
+	test("engine reproduces every baked catalog compat/thinking value", () => {
 		const diffs: string[] = [];
 		let rows = 0;
-		for (const provider in models) {
-			const providerModels = models[provider as keyof typeof models] as Record<string, unknown>;
-			for (const modelId in providerModels) {
-				const row = providerModels[modelId] as unknown as Model<Api> & RowLike;
+		for (const provider of getBundledProviders()) {
+			for (const model of getBundledModels(provider)) {
+				const row = model as unknown as RowLike;
 				rows++;
-				const label = `${provider}/${modelId}`;
+				const label = `${provider}/${row.id}`;
 				const {
 					compat: _compat,
 					compatConfig,
@@ -102,6 +108,7 @@ describe("compat parity", () => {
 				}
 				const exempt = keepsExplicitThinking(row);
 				if (!exempt) (rest as Record<string, unknown>).thinking = undefined;
+				if (row.thinking?.unverified === true) (rest as Record<string, unknown>).reasoning = undefined;
 				const umansAuthored =
 					provider === "umans" && (row.thinking?.requiresEffort === true || row.id === "umans-kimi-k2.7");
 				let policy: ReturnType<typeof resolveModelPolicy>;
